@@ -58,18 +58,25 @@ python perf_check.py
 
 The script creates its own SQLite database and removes it when it finishes. It does not use `brightloop.db`.
 
-## Vercel (not deployed)
+## Live deployment
 
-Deployment is still on hold. The repository has Vercel settings for two projects: set the backend project’s root directory to `backend` and the frontend project’s root directory to `frontend`.
+Brightloop is deployed as two Vercel projects:
 
-The API needs a hosted PostgreSQL database; SQLite files aren’t persistent on Vercel. Before deploying the backend, set `DATABASE_URL` and run `python -m alembic upgrade head` from `backend` against that database. Configure these backend environment variables in Vercel:
+| Service | Live URL |
+| --- | --- |
+| Frontend | [xdcoderz-odoo-flux-31-rghi.vercel.app](https://xdcoderz-odoo-flux-31-rghi.vercel.app/) |
+| Backend API | [xdcoderz-odoo-flux-31.vercel.app](https://xdcoderz-odoo-flux-31.vercel.app/) |
+| API health | [xdcoderz-odoo-flux-31.vercel.app/api/health](https://xdcoderz-odoo-flux-31.vercel.app/api/health) |
+| API documentation | [xdcoderz-odoo-flux-31.vercel.app/docs](https://xdcoderz-odoo-flux-31.vercel.app/docs) |
 
-- `TOKEN_SECRET`: a unique, randomly generated secret.
-- `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD`: used to create the first admin on startup.
-- `SEED_DEMO_DATA=false`: keep the local demo accounts out of the hosted database.
-- `FRONTEND_URL` and `CORS_ORIGINS`: the deployed frontend URL.
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, and `SMTP_SSL`: optional until an email provider is configured. Without SMTP, password-reset emails are unavailable and invoice sends are recorded as simulated.
+Both projects use this repository. The Vercel root directory is `frontend` for the UI and `backend` for the API. The frontend’s `VITE_API_URL` points to `https://xdcoderz-odoo-flux-31.vercel.app/api`.
 
-After the backend is deployed, set `VITE_API_URL` on the frontend project to `https://<backend-domain>/api`. Once the frontend has its final URL, add that exact origin to `CORS_ORIGINS` and redeploy the backend.
+The API runs on Vercel and uses the Neon PostgreSQL project `brightloop-subscriptions` in Asia Pacific (Singapore). The initial Alembic schema migration (`58c430309754`) has been applied. The API health endpoint returned `200`, and the frontend origin passed the backend CORS preflight check.
 
-Vercel deployment files are `backend/vercel.json` and `frontend/vercel.json`. No deployment has been made.
+SMTP environment variables have been configured in the backend’s Vercel project using `brightloop28@gmail.com`. Redeploy the backend after changing environment variables. Then verify email delivery with a password-reset request; until that check succeeds, SMTP delivery is not confirmed.
+
+## Vercel deployment settings
+
+The API requires hosted PostgreSQL; SQLite files aren’t persistent on Vercel. Keep database URLs, token secrets, admin passwords, and SMTP app passwords in Vercel environment variables, not in source control. Configure the backend project with `DATABASE_URL`, `TOKEN_SECRET`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_PASSWORD`, `SEED_DEMO_DATA=false`, `FRONTEND_URL`, and `CORS_ORIGINS`. SMTP uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, and `SMTP_SSL`.
+
+When deploying a new frontend URL, update `FRONTEND_URL` and `CORS_ORIGINS` in the backend project and redeploy the API. For a new backend URL, update `VITE_API_URL` in the frontend project and redeploy the UI. Vercel settings are in `backend/vercel.json` and `frontend/vercel.json`.
