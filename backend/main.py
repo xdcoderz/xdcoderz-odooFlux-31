@@ -9,11 +9,11 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Generator
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, select
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./brightloop.db")
@@ -140,11 +140,17 @@ class SubscriptionIn(BaseModel):
     quantity: int = Field(default=1, ge=1)
     payment_terms_days: int = Field(default=14, ge=0)
 
+class SubscriptionTransitionIn(BaseModel):
+    to: str
+
 class PaymentIn(BaseModel):
     method: str = Field(min_length=1, max_length=40)
     amount_minor: int = Field(gt=0)
     paid_at: datetime | None = None
     note: str = ""
+
+class BillingRunIn(BaseModel):
+    as_of: date | None = None
 
 class StaffIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
@@ -240,6 +246,12 @@ def add_period(day: date, period: str) -> date:
     return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
 
 
+def paginated(db: Session, query, count_query, page: int, page_size: int, serialize) -> dict:
+    total = db.scalar(count_query) or 0
+    records = list(db.scalars(query.offset((page - 1) * page_size).limit(page_size)))
+    return {"items": [serialize(record) for record in records], "total": total, "page": page, "page_size": page_size}
+
+
 def customer_dict(c: Customer) -> dict:
     return {"id": c.id, "name": c.name, "email": c.email}
 
@@ -255,7 +267,7 @@ def plan_dict(db: Session, p: Plan) -> dict:
 
 def subscription_dict(db: Session, s: Subscription) -> dict:
     c, p = db.get(Customer, s.customer_id), db.get(Plan, s.plan_id)
-    return {"id": s.id, "number": s.number, "customer_id": s.customer_id, "customer_name": c.name if c else "", "plan_id": s.plan_id, "plan_name": p.name if p else "", "start_date": s.start_date.isoformat(), "next_billing_date": s.next_billing_date.isoformat(), "status": s.status, "quantity": s.quantity, "payment_terms_days": s.payment_terms_days, "amount_minor": (p.price_minor * s.quantity) if p else 0}
+    return {"id": s.id, "number": s.number, "customer_id": s.customer_id, "customer_name": c.name if c else "", "customer_email": c.email if c else "", "plan_id": s.plan_id, "plan_name": p.name if p else "", "product_name": (db.get(Product, p.product_id).name if p and db.get(Product, p.product_id) else ""), "start_date": s.start_date.isoformat(), "next_billing_date": s.next_billing_date.isoformat(), "status": s.status, "quantity": s.quantity, "payment_terms_days": s.payment_terms_days, "billing_period": p.billing_period if p else "monthly", "unit_price_minor": p.price_minor if p else 0, "amount_minor": (p.price_minor * s.quantity) if p else 0}
 
 
 def invoice_dict(db: Session, i: Invoice) -> dict:
@@ -323,8 +335,13 @@ def me(user: User = Depends(current_user)) -> dict:
 
 
 @app.get("/api/products")
-def list_products(_: User = Depends(current_user), db: Session = Depends(db_session)) -> list[dict]:
-    return [product_dict(p) for p in db.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name).limit(100))]
+def list_products(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", _: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    query = select(Product).where(Product.active.is_(True))
+    count_query = select(func.count(Product.id)).where(Product.active.is_(True))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query, count_query = query.where(Product.name.ilike(term)), count_query.where(Product.name.ilike(term))
+    return paginated(db, query.order_by(Product.name), count_query, page, page_size, product_dict)
 
 
 @app.post("/api/products", status_code=201)
@@ -337,8 +354,13 @@ def create_product(body: ProductIn, _: User = Depends(admin_user), db: Session =
 
 
 @app.get("/api/plans")
-def list_plans(_: User = Depends(current_user), db: Session = Depends(db_session)) -> list[dict]:
-    return [plan_dict(db, p) for p in db.scalars(select(Plan).where(Plan.active.is_(True)).order_by(Plan.name).limit(100))]
+def list_plans(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", _: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    query = select(Plan).where(Plan.active.is_(True))
+    count_query = select(func.count(Plan.id)).where(Plan.active.is_(True))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query, count_query = query.where(Plan.name.ilike(term)), count_query.where(Plan.name.ilike(term))
+    return paginated(db, query.order_by(Plan.name), count_query, page, page_size, lambda p: plan_dict(db, p))
 
 
 @app.post("/api/plans", status_code=201)
@@ -355,8 +377,13 @@ def create_plan(body: PlanIn, _: User = Depends(admin_user), db: Session = Depen
 
 
 @app.get("/api/customers")
-def list_customers(_: User = Depends(staff_user), db: Session = Depends(db_session)) -> list[dict]:
-    return [customer_dict(c) for c in db.scalars(select(Customer).order_by(Customer.name).limit(100))]
+def list_customers(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    query, count_query = select(Customer), select(func.count(Customer.id))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        condition = or_(Customer.name.ilike(term), Customer.email.ilike(term))
+        query, count_query = query.where(condition), count_query.where(condition)
+    return paginated(db, query.order_by(Customer.name), count_query, page, page_size, customer_dict)
 
 
 @app.post("/api/customers", status_code=201)
@@ -386,12 +413,44 @@ def create_staff(body: StaffIn, _: User = Depends(admin_user), db: Session = Dep
     return {"id": user.id, "email": user.email, "role": user.role}
 
 
+@app.get("/api/subscriptions/{subscription_id}")
+def get_subscription(subscription_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    sub = db.get(Subscription, subscription_id)
+    if sub is None or (user.role == "customer" and sub.customer_id != user.customer_id):
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    result = subscription_dict(db, sub)
+    result["invoices"] = [invoice_dict(db, inv) for inv in db.scalars(select(Invoice).where(Invoice.subscription_id == sub.id).order_by(Invoice.created_at.desc()).limit(25))]
+    return result
+
+
+@app.post("/api/subscriptions/{subscription_id}/transition")
+def transition_subscription(subscription_id: int, body: SubscriptionTransitionIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    sub = db.get(Subscription, subscription_id)
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    allowed = {"Draft": {"Quotation"}, "Quotation": {"Draft", "Confirmed"}, "Confirmed": {"Active"}, "Active": {"Closed"}, "Closed": set()}
+    if body.to not in allowed.get(sub.status, set()):
+        raise HTTPException(status_code=409, detail=f"Cannot move a {sub.status} subscription to {body.to}")
+    sub.status = body.to
+    db.commit()
+    db.refresh(sub)
+    return subscription_dict(db, sub)
+
+
 @app.get("/api/subscriptions")
-def list_subscriptions(user: User = Depends(current_user), db: Session = Depends(db_session)) -> list[dict]:
-    query = select(Subscription).order_by(Subscription.start_date.desc()).limit(100)
+def list_subscriptions(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", status_filter: str = "", user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    query, count_query = select(Subscription), select(func.count(Subscription.id))
+    conditions = []
     if user.role == "customer":
-        query = query.where(Subscription.customer_id == user.customer_id)
-    return [subscription_dict(db, s) for s in db.scalars(query)]
+        conditions.append(Subscription.customer_id == user.customer_id)
+    if status_filter.strip():
+        conditions.append(Subscription.status == status_filter.strip())
+    if search.strip():
+        term = f"%{search.strip()}%"
+        conditions.append(or_(Subscription.number.ilike(term), Subscription.customer_id.in_(select(Customer.id).where(or_(Customer.name.ilike(term), Customer.email.ilike(term)))), Subscription.plan_id.in_(select(Plan.id).where(Plan.name.ilike(term)))))
+    if conditions:
+        query, count_query = query.where(*conditions), count_query.where(*conditions)
+    return paginated(db, query.order_by(Subscription.start_date.desc()), count_query, page, page_size, lambda s: subscription_dict(db, s))
 
 
 @app.post("/api/subscriptions", status_code=201)
@@ -401,7 +460,7 @@ def create_subscription(body: SubscriptionIn, _: User = Depends(staff_user), db:
         raise HTTPException(status_code=404, detail="Customer or plan not found")
     if body.quantity < plan.min_qty:
         raise HTTPException(status_code=422, detail=f"Plan minimum quantity is {plan.min_qty}")
-    subscription = Subscription(number=f"SUB-{secrets.token_hex(3).upper()}", customer_id=customer.id, plan_id=plan.id, start_date=body.start_date, next_billing_date=body.start_date, status="Active", quantity=body.quantity, payment_terms_days=body.payment_terms_days)
+    subscription = Subscription(number=f"SUB-{secrets.token_hex(3).upper()}", customer_id=customer.id, plan_id=plan.id, start_date=body.start_date, next_billing_date=body.start_date, status="Draft", quantity=body.quantity, payment_terms_days=body.payment_terms_days)
     db.add(subscription)
     db.commit()
     db.refresh(subscription)
@@ -409,16 +468,70 @@ def create_subscription(body: SubscriptionIn, _: User = Depends(staff_user), db:
 
 
 @app.get("/api/invoices")
-def list_invoices(user: User = Depends(current_user), db: Session = Depends(db_session)) -> list[dict]:
-    query = select(Invoice).order_by(Invoice.created_at.desc()).limit(100)
+def list_invoices(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", status_filter: str = "", overdue: bool = False, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    query, count_query = select(Invoice), select(func.count(Invoice.id))
+    conditions = []
     if user.role == "customer":
-        query = query.where(Invoice.customer_id == user.customer_id)
-    return [invoice_dict(db, i) for i in db.scalars(query)]
+        conditions.append(Invoice.customer_id == user.customer_id)
+    if status_filter.strip():
+        conditions.append(Invoice.status == status_filter.strip())
+    if overdue:
+        conditions.extend([Invoice.status != "Paid", Invoice.due_date < date.today()])
+    if search.strip():
+        term = f"%{search.strip()}%"
+        conditions.append(or_(Invoice.number.ilike(term), Invoice.customer_id.in_(select(Customer.id).where(or_(Customer.name.ilike(term), Customer.email.ilike(term))))))
+    if conditions:
+        query, count_query = query.where(*conditions), count_query.where(*conditions)
+    return paginated(db, query.order_by(Invoice.created_at.desc()), count_query, page, page_size, lambda i: invoice_dict(db, i))
+
+
+def payment_dict(db: Session, payment: Payment) -> dict:
+    invoice = db.get(Invoice, payment.invoice_id)
+    customer = db.get(Customer, invoice.customer_id) if invoice else None
+    return {"id": payment.id, "invoice_id": payment.invoice_id, "invoice_number": invoice.number if invoice else "", "customer_name": customer.name if customer else "", "method": payment.method, "amount_minor": payment.amount_minor, "paid_at": payment.paid_at.isoformat(), "note": payment.note}
+
+
+@app.get("/api/invoices/{invoice_id}")
+def get_invoice(invoice_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None or (user.role == "customer" and invoice.customer_id != user.customer_id):
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    customer = db.get(Customer, invoice.customer_id)
+    subscription = db.get(Subscription, invoice.subscription_id)
+    lines = list(db.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id).order_by(InvoiceLine.id)))
+    payments = list(db.scalars(select(Payment).where(Payment.invoice_id == invoice.id).order_by(Payment.paid_at.desc())))
+    result = invoice_dict(db, invoice)
+    result["customer"] = customer_dict(customer) if customer else None
+    result["subscription_number"] = subscription.number if subscription else ""
+    result["lines"] = [{"id": line.id, "description": line.description, "quantity": line.quantity, "unit_price_minor": line.unit_price_minor, "amount_minor": line.amount_minor, "tax_minor": 0} for line in lines]
+    result["payments"] = [{"id": p.id, "method": p.method, "amount_minor": p.amount_minor, "paid_at": p.paid_at.isoformat(), "note": p.note} for p in payments]
+    return result
+
+
+@app.get("/api/payments")
+def list_payments(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    query, count_query = select(Payment), select(func.count(Payment.id))
+    if user.role == "customer":
+        allowed_invoice_ids = select(Invoice.id).where(Invoice.customer_id == user.customer_id)
+        query, count_query = query.where(Payment.invoice_id.in_(allowed_invoice_ids)), count_query.where(Payment.invoice_id.in_(allowed_invoice_ids))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        matching_invoice_ids = select(Invoice.id).join(Customer, Customer.id == Invoice.customer_id).where(or_(Invoice.number.ilike(term), Customer.name.ilike(term)))
+        condition = Payment.invoice_id.in_(matching_invoice_ids)
+        query, count_query = query.where(condition), count_query.where(condition)
+    return paginated(db, query.order_by(Payment.paid_at.desc()), count_query, page, page_size, lambda p: payment_dict(db, p))
+
+
+@app.get("/api/billing/preview")
+def billing_preview(as_of: date | None = None, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    cutoff = as_of or date.today()
+    due_count = db.scalar(select(func.count(Subscription.id)).where(Subscription.status == "Active", Subscription.next_billing_date <= cutoff)) or 0
+    return {"as_of": cutoff.isoformat(), "due_count": due_count, "skipped": 0}
 
 
 @app.post("/api/billing/run")
-def run_billing(_: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
-    today = date.today()
+def run_billing(body: BillingRunIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    today = body.as_of or date.today()
     due_subscriptions = list(db.scalars(select(Subscription).where(Subscription.status == "Active", Subscription.next_billing_date <= today).order_by(Subscription.id)))
     created: list[str] = []
     for sub in due_subscriptions:
@@ -438,7 +551,7 @@ def run_billing(_: User = Depends(staff_user), db: Session = Depends(db_session)
         sub.next_billing_date = add_period(period_start, plan.billing_period)
         created.append(invoice.number)
     db.commit()
-    return {"created": len(created), "invoice_numbers": created, "message": f"Created {len(created)} invoice(s)"}
+    return {"created": len(created), "skipped": len(due_subscriptions) - len(created), "failed": 0, "invoice_numbers": created, "message": f"Created {len(created)} invoice(s)"}
 
 
 @app.post("/api/invoices/{invoice_id}/payments", status_code=201)
@@ -478,7 +591,10 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
     balance_expr = case((Invoice.total_minor > paid_amount, Invoice.total_minor - paid_amount), else_=0)
     balance_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status != "Paid")
     overdue_count_query = select(func.count(Invoice.id)).where(Invoice.status != "Paid", Invoice.due_date < date.today())
-    overdue_list_query = select(Invoice).where(Invoice.status != "Paid", Invoice.due_date < date.today()).order_by(Invoice.due_date).limit(10)
+    overdue_list_query = select(Invoice).where(Invoice.status != "Paid", Invoice.due_date < date.today()).order_by(Invoice.due_date).limit(25)
+    overdue_amount_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status != "Paid", Invoice.due_date < date.today())
+    status_query = select(Subscription.status, func.count(Subscription.id)).group_by(Subscription.status)
+    active_list_query = select(Subscription).where(Subscription.status == "Active").order_by(Subscription.next_billing_date).limit(10)
     history_day = func.date(Payment.paid_at)
     history_query = select(history_day.label("day"), func.sum(Payment.amount_minor).label("amount_minor")).join(Invoice, Invoice.id == Payment.invoice_id).where(Payment.paid_at >= datetime.utcnow() - timedelta(days=30)).group_by(history_day).order_by(history_day)
     mrr_value = case(
@@ -490,17 +606,25 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
         balance_query = balance_query.where(Invoice.customer_id == customer_filter)
         overdue_count_query = overdue_count_query.where(Invoice.customer_id == customer_filter)
         overdue_list_query = overdue_list_query.where(Invoice.customer_id == customer_filter)
+        overdue_amount_query = overdue_amount_query.where(Invoice.customer_id == customer_filter)
+        status_query = status_query.where(Subscription.customer_id == customer_filter)
+        active_list_query = active_list_query.where(Subscription.customer_id == customer_filter)
         mrr_query = mrr_query.where(Subscription.customer_id == customer_filter)
         history_query = history_query.where(Invoice.customer_id == customer_filter)
     overdue_rows = list(db.scalars(overdue_list_query))
     history_rows = db.execute(history_query).all()
     revenue_history = [{"day": str(day), "amount_minor": amount or 0} for day, amount in history_rows]
+    subscription_status_counts = {name: count for name, count in db.execute(status_query).all()}
+    active_subscription_rows = list(db.scalars(active_list_query))
     return {
         "active_subscriptions": active_count,
         "revenue_minor": paid_revenue,
         "outstanding_minor": db.scalar(balance_query) or 0,
         "overdue_count": db.scalar(overdue_count_query) or 0,
+        "overdue_amount_minor": db.scalar(overdue_amount_query) or 0,
         "mrr_minor": db.scalar(mrr_query) or 0,
+        "subscription_status_counts": subscription_status_counts,
+        "active_subscription_rows": [subscription_dict(db, row) for row in active_subscription_rows],
         "revenue_history": revenue_history,
         "revenue_30d_minor": sum(row["amount_minor"] for row in revenue_history),
         "overdue_invoices": [invoice_dict(db, inv) for inv in overdue_rows],

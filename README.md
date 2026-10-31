@@ -41,10 +41,11 @@ Demo customer sign-in:
 ## Current workflow
 
 1. Sign in as admin and review the seeded customer, product, monthly plan, and due subscription.
-2. Click **Run billing**. Each due active subscription gets at most one invoice for its billing period.
-3. Record a payment from the invoice list. Paid invoices update the dashboard totals.
-4. Create a customer, product, plan, or subscription from the relevant screen.
-5. Sign in as the demo customer to see the customer-scoped portal.
+2. Open a subscription to review its lines and lifecycle. Use the guarded actions to move it through quotation, confirmation, activation, and closure.
+3. Choose **Run billing**, review the cutoff and due count, then create invoices. Each due active subscription gets at most one invoice for its billing period.
+4. Open an invoice to review its line and payment history, print it, or record a payment. Paid invoices update the dashboard totals.
+5. Create a customer, product, plan, or subscription from the relevant screen.
+6. Sign in as the demo customer to see the customer-scoped portal.
 
 Money is stored as integer paise. Invoice lines snapshot the plan price at billing time. Access roles are `admin`, `staff`, and `customer`; public signup always creates a customer account.
 
@@ -54,4 +55,6 @@ Create a Railway project with a Postgres database and two services rooted at `ba
 
 ## Scope notes
 
-This is an MVP foundation. Billing runs on demand from the staff button; no scheduler or payment gateway is connected. Tax, discount rules, quotation templates, reset emails, PDF generation, pause/renew actions, and production database migrations are not included yet. The sign-in chart is illustrative; dashboard figures and records come from the API. Lists currently return the first 100 rows and need pagination before larger deployments.
+The UI follows the supplied Stripe-style tokens and adds role-filtered navigation, shared status badges, a due-count billing dialog, dashboard tabs, a payments page, and server-side list pagination (25 rows by default; up to 100 per request). Search is debounced and sent to the API. Dashboard figures and chart data come from aggregate queries; the sign-in art is illustrative.
+
+This remains an MVP foundation. Quotation templates, tax and discount setup, product variants, password reset delivery, invoice email/download, advanced filter controls, and production database migrations are not included yet. Billing is on demand; there is no scheduler or payment gateway. Railway configuration is present, but deployment has not been done.
