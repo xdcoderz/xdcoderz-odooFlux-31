@@ -64,7 +64,13 @@ function App() {
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) },
     })
     const data = response.status === 204 ? null : await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(data?.detail || 'Something went wrong')
+    if (!response.ok) {
+      const detail = data?.detail
+      const message = Array.isArray(detail)
+        ? detail.map(issue => `${(issue.loc || []).filter(part => part !== 'body').join(' · ')}: ${issue.msg}`).join('; ')
+        : typeof detail === 'string' ? detail : 'Unable to save. Please try again.'
+      throw new Error(message)
+    }
     return data
   }, [token])
 
@@ -262,12 +268,12 @@ function App() {
   async function submitForm(event, path, onDone) {
     event.preventDefault(); const form = event.currentTarget; const body = Object.fromEntries(new FormData(form).entries())
     for (const key of ['price_minor', 'cost_minor', 'min_amount_minor']) if (body[key] !== undefined) body[key] = Math.round(Number(body[key]) * 100)
-    for (const key of ['min_qty', 'customer_id', 'plan_id', 'quantity', 'payment_terms_days', 'tax_id', 'discount_id']) if (body[key] !== undefined) body[key] = body[key] ? Number(body[key]) : null
+    for (const key of ['min_qty', 'customer_id', 'plan_id', 'quantity', 'payment_terms_days', 'tax_id', 'discount_id', 'template_id']) if (body[key] !== undefined) body[key] = body[key] ? Number(body[key]) : null
     if (body.product_id !== undefined) body.product_id = body.product_id === '' ? null : Number(body.product_id)
     if (body.usage_limit === '') body.usage_limit = null
     for (const key of ['rate_percent', 'value']) if (body[key] !== undefined) body[key] = Number(body[key] || 0)
     for (const key of ['auto_close', 'closable', 'pausable', 'renewable', 'is_default', 'auto_apply']) body[key] = form.elements.namedItem(key)?.checked ?? false
-    for (const key of ['starts_on', 'ends_on']) if (body[key] === '') body[key] = null
+    for (const key of ['starts_on', 'ends_on', 'expiry_date', 'available_from', 'available_until']) if (body[key] === '') body[key] = null
     if (path === '/products' && body.variants_text) body.variants = body.variants_text.split('\n').map(row => row.trim()).filter(Boolean).map(row => { const [attribute, raw] = row.split('='); const [value, extra='0'] = (raw || '').split('|'); return { attribute: attribute.trim(), value: value.trim(), extra_price_minor: Math.round(Number(extra.trim()) * 100) } }).filter(v => v.attribute && v.value)
     delete body.variants_text
     setBusy(true)
