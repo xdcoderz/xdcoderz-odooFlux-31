@@ -1,0 +1,9 @@
+{
+  "name": "brightloop-subscription-console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=20.19" },
+  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build", "preview": "vite preview --host 0.0.0.0", "start": "vite preview" },
+  "dependencies": { "@vitejs/plugin-react": "6.1.2", "vite": "8.3.5", "react": "19.3.1", "react-dom": "19.3.1", "lucide-react": "0.468.0" }
+}
