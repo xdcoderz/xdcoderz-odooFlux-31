@@ -8,3 +8,5 @@ __pycache__/
 .env.local
 .vercel/
 .neon
+/work/
+/frontend/probe.html

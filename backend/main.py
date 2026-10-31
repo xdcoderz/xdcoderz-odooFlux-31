@@ -1715,8 +1715,8 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
     ).group_by(SubscriptionLine.subscription_id).subquery()
     recurring_base = func.coalesce(recurring_lines.c.subtotal_minor, Plan.price_minor * Subscription.quantity)
     mrr_value = case(
-        (Plan.billing_period == "daily", cast(recurring_base / 30, Integer)),
-        (Plan.billing_period == "weekly", cast(recurring_base / 4, Integer)),
+        (Plan.billing_period == "daily", cast(recurring_base * 12 / 365, Integer)),
+        (Plan.billing_period == "weekly", cast(recurring_base * 52 / 12, Integer)),
         (Plan.billing_period == "yearly", cast(recurring_base / 12, Integer)),
         else_=recurring_base,
     )
@@ -1735,13 +1735,16 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
     revenue_history = [{"day": str(day), "amount_minor": amount or 0} for day, amount in history_rows]
     subscription_status_counts = {name: count for name, count in db.execute(status_query).all()}
     active_subscription_rows = list(db.scalars(active_list_query))
+    mrr_minor = db.scalar(mrr_query) or 0
     return {
         "active_subscriptions": active_count,
         "revenue_minor": paid_revenue,
         "outstanding_minor": db.scalar(balance_query) or 0,
         "overdue_count": db.scalar(overdue_count_query) or 0,
         "overdue_amount_minor": db.scalar(overdue_amount_query) or 0,
-        "mrr_minor": db.scalar(mrr_query) or 0,
+        "mrr_minor": mrr_minor,
+        "arr_minor": mrr_minor * 12,
+        "mrr_basis": "Active subscription line value, normalized monthly; before tax and discounts",
         "subscription_status_counts": subscription_status_counts,
         "active_subscription_rows": [subscription_dict(db, row) for row in active_subscription_rows],
         "revenue_history": revenue_history,

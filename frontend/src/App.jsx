@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Activity, ArrowDownLeft, ArrowUpRight, BadgeIndianRupee, Check, CircleHelp, CreditCard, FileText, LayoutDashboard, LogOut, Plus, RefreshCw, Search, ShieldCheck, Users, X, Eye, EyeOff, CheckCircle2, Circle, Percent, Send, Mail, Tag, Ban } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Activity, ArrowDownLeft, ArrowUpRight, BadgeIndianRupee, Check, ChevronDown, CircleHelp, CreditCard, FileText, LayoutDashboard, LogOut, Plus, RefreshCw, Search, ShieldCheck, Users, X, Eye, EyeOff, CheckCircle2, Circle, Percent, Send, Mail, Tag, Ban, ChartNoAxesCombined } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000/api' : '/api')
 const money = (minor = 0) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format((Number(minor) || 0) / 100)
@@ -29,6 +29,9 @@ function App() {
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('All')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
+  const accountRef = useRef(null)
   const [paymentInvoice, setPaymentInvoice] = useState(null)
   const [billingOpen, setBillingOpen] = useState(false)
   const [selectedSubscriptionId, setSelectedSubscriptionId] = useState(null)
@@ -42,6 +45,18 @@ function App() {
   const [filter, setFilter] = useState('')
   const isStaff = me?.role === 'admin' || me?.role === 'staff'
   const isAdmin = me?.role === 'admin'
+
+  useEffect(() => {
+    if (!accountOpen) return
+    const closeOnOutside = event => { if (!accountRef.current?.contains(event.target)) setAccountOpen(false) }
+    const closeOnEscape = event => { if (event.key === 'Escape') setAccountOpen(false) }
+    document.addEventListener('pointerdown', closeOnOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [accountOpen])
 
   const request = useCallback(async (path, options = {}) => {
     const response = await fetch(`${API}${path}`, {
@@ -172,7 +187,7 @@ function App() {
     } catch (err) { setNotice(err.message) } finally { setBusy(false) }
   }
 
-  function signOut() { localStorage.removeItem('brightloop_token'); setToken(''); setMe(null); setSessionLoading(false) }
+  function signOut() { localStorage.removeItem('brightloop_token'); setToken(''); setMe(null); setSessionLoading(false); setAccountOpen(false) }
   async function login(event) {
     event.preventDefault(); setBusy(true)
     try {
@@ -265,16 +280,19 @@ function App() {
     catch (error) { setNotice(error.message) } finally { setBusy(false) }
   }
 
-  if (token && !me && sessionLoading) return <div className="session-loading" role="status" aria-live="polite"><span className="brand-mark"><Activity size={20}/></span><strong>Opening your workspace…</strong></div>
+  if (token && !me && sessionLoading) return <div className="session-loading" role="status" aria-live="polite"><span className="brand-mark"><RefreshCw size={20}/><i className="brand-spark"/></span><strong>Opening your workspace…</strong></div>
   if (!token || !me) return <Login email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} name={signupName} setName={setSignupName} mode={loginMode} setMode={setLoginMode} onSubmit={loginMode === 'signup' ? signup : loginMode === 'forgot' ? requestPasswordReset : loginMode === 'reset' ? confirmPasswordReset : login} busy={busy} notice={notice} />
 
-  const nav = isAdmin ? [
-    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users }, { name: 'Requests', icon: CircleHelp }, { name: 'Reports', icon: BadgeIndianRupee }, { name: 'Staff', icon: ShieldCheck }, { name: 'Products', icon: CreditCard }, { name: 'Plans', icon: CreditCard }, { name: 'Templates', icon: FileText },
-  ] : isStaff ? [
-    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users }, { name: 'Requests', icon: CircleHelp }, { name: 'Reports', icon: BadgeIndianRupee },
+  const primaryNav = isStaff ? [
+    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Customers', icon: Users }, { name: 'Reports', icon: ChartNoAxesCombined },
   ] : [
     { name: 'My subscriptions', icon: RefreshCw }, { name: 'My invoices', icon: FileText }, { name: 'My account', icon: Users },
   ]
+  const toolsNav = isStaff ? [
+    { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Billing rules', icon: Percent }, { name: 'Requests', icon: CircleHelp },
+    ...(isAdmin ? [{ name: 'Products', icon: CreditCard }, { name: 'Plans', icon: CreditCard }, { name: 'Templates', icon: FileText }, { name: 'Staff', icon: ShieldCheck }] : []),
+  ] : []
+  const toolsActive = toolsNav.some(item => item.name === view)
 
   const filteredSubs = subscriptions
   const filteredInvoices = invoices.filter(inv => {
@@ -285,12 +303,13 @@ function App() {
 
   return <div className={`app-shell ${me.role === 'customer' ? 'customer-shell' : ''}`}>
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><Activity size={20} strokeWidth={2.6} /></span><span>brightloop<span className="brand-dot">.</span><small>SUBSCRIPTION OPS</small></span></div>
+      <div className="brand"><span className="brand-mark"><RefreshCw size={20} strokeWidth={2.6} /><i className="brand-spark"/></span><span>brightloop<span className="brand-dot">.</span><small>SUBSCRIPTION OPS</small></span></div>
       <div className="workspace-label">Workspace</div>
       <div className="workspace-switch"><span className="workspace-icon">B</span><span>Brightloop Software<small>Subscription operations</small></span></div>
       <div className="nav-label">Operations</div>
-      <nav aria-label="Main navigation">{nav.map(({ name, icon: Icon }) => <button key={name} aria-current={view === name ? 'page' : undefined} className={`nav-item ${view === name ? 'active' : ''}`} onClick={() => setView(name)}><Icon size={17} /><span>{name}</span>{name === 'Invoices' && overview?.overdue_count > 0 && <span className="nav-count">{overview.overdue_count}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="help-card"><span className="help-icon"><CircleHelp size={17} /></span><strong>One billing workspace</strong><p>Plans, subscriptions, invoices and payments stay connected here.</p></div><button className="profile" onClick={signOut} aria-label={`Sign out ${me.email}`}><span className="avatar">{(me.email || 'B')[0].toUpperCase()}</span><span className="profile-text">{me.email}<small>{me.role} · Sign out</small></span><LogOut size={16} /></button></div>
+      <nav className="primary-nav" aria-label="Main navigation">{primaryNav.map(({ name, icon: Icon }) => <button key={name} aria-current={view === name ? 'page' : undefined} className={`nav-item ${view === name ? 'active' : ''}`} onClick={() => setView(name)}><Icon size={18} /><span>{name}</span>{name === 'Invoices' && overview?.overdue_count > 0 && <span className="nav-count">{overview.overdue_count}</span>}</button>)}</nav>
+      {toolsNav.length > 0 && <div className="nav-tools"><button className={`nav-group-toggle ${toolsActive ? 'active' : ''}`} aria-expanded={toolsOpen || toolsActive} onClick={() => setToolsOpen(open => !open)}><span><CircleHelp size={18}/><span>More tools</span></span><ChevronDown size={16}/></button>{(toolsOpen || toolsActive) && <div className="nav-subitems">{toolsNav.map(({name,icon:Icon})=><button key={name} className={`nav-item sub-nav ${view===name?'active':''}`} aria-current={view===name?'page':undefined} onClick={()=>setView(name)}><Icon size={17}/><span>{name}</span></button>)}</div>}</div>}
+      <div className="sidebar-bottom"><div className="account-wrap" ref={accountRef}><button className="profile" aria-label="Open account menu" aria-haspopup="menu" aria-expanded={accountOpen} onClick={()=>setAccountOpen(open=>!open)}><span className="avatar">{(me.email || 'B')[0].toUpperCase()}</span><span className="profile-text">{me.email}<small>{me.role}</small></span><ChevronDown size={16} /></button>{accountOpen&&<div className="account-menu" role="menu"><div className="account-summary"><strong>{me.email}</strong><small>{me.role} account</small></div>{me.role==='customer'&&<button role="menuitem" onClick={()=>{setView('My account');setAccountOpen(false)}}><Users size={16}/> My account</button>}<button role="menuitem" className="signout-item" onClick={signOut}><LogOut size={16}/> Sign out</button></div>}</div></div>
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumbs">Brightloop <span>/</span> <strong>{view}</strong></div><div className="top-actions"><div className="secure-label"><ShieldCheck size={15} /> {me.role === 'customer' ? 'Customer portal' : 'Operations workspace'}</div><span className="top-avatar" aria-hidden="true">{(me.email || 'B')[0].toUpperCase()}</span></div></header>
@@ -327,7 +346,7 @@ function Login({ email, setEmail, password, setPassword, name, setName, mode, se
   const passwordReady = rules.every(([,valid])=>valid) && password === confirmPassword
   const signupReady = passwordReady && Boolean(name.trim()) && Boolean(email.trim())
   const noticeIsSuccess = notice.startsWith('If an active account exists') || notice.startsWith('Password updated')
-  return <main className="login-shell"><section className="login-panel"><div className="brand login-brand"><span className="brand-mark"><Activity size={20} strokeWidth={2.6} /></span><span>brightloop<span className="brand-dot">.</span><small>SUBSCRIPTION OPS</small></span></div>
+  return <main className="login-shell"><section className="login-panel"><div className="brand login-brand"><span className="brand-mark"><RefreshCw size={20} strokeWidth={2.6} /><i className="brand-spark"/></span><span>brightloop<span className="brand-dot">.</span><small>SUBSCRIPTION OPS</small></span></div>
     <div className="login-copy"><div className="eyebrow"><span className="eyebrow-dot" /> Billing, in one place</div><h1>{mode === 'signup' ? <>A clearer way<br/>to <em>subscribe.</em></> : mode === 'forgot' || mode === 'reset' ? <>Account<br/><em>recovery.</em></> : <>Good billing<br/>builds <em>trust.</em></>}</h1><p>{mode === 'forgot' ? 'We’ll send a one-time password reset link if the account exists.' : mode === 'reset' ? 'Choose a new password to get back into your account.' : 'Manage your plans, customers, and recurring revenue with a little more clarity.'}</p></div>
     <form className="login-form" onSubmit={onSubmit}>
       {mode === 'signup' && <label>Your name<input value={name} onChange={e=>setName(e.target.value)} autoComplete="name" required/></label>}
@@ -340,7 +359,7 @@ function Login({ email, setEmail, password, setPassword, name, setName, mode, se
       {import.meta.env.DEV && mode === 'login' && <><div className="demo-login"><span className="demo-dot"/> Demo admin: admin@brightloop.demo <span>Brightloop!2026</span></div><div className="demo-login"><span className="demo-dot"/> Demo client: billing@northstar.example <span>Customer!2026</span></div></>}
       <div className="demo-login"><button type="button" className="text-button" onClick={()=>setMode(mode==='login'?'signup':'login')}>{mode==='signup'?'Existing customer? Sign in instead':mode==='login'?'Create new customer account':'Back to sign in'}</button></div>
     </form><footer className="login-footer"><span><ShieldCheck size={14}/> Role-based access</span><span>Plans to payments, in one place</span></footer></section>
-  <div className="login-art" aria-hidden="true"><div className="art-grid"/><div className="art-orb orb-one"/><div className="art-orb orb-two"/><div className="art-content"><div className="art-topline"><span><span className="brand-mark"><Activity size={16}/></span> Brightloop workspace</span><span className="art-live"><i/> Subscription operations</span></div><div className="art-story"><span className="art-kicker">A clear path through recurring revenue</span><h2>From first plan<br/>to final payment.</h2><p>Keep every handoff visible, from the quote a customer accepts to the invoice they settle.</p></div><div className="art-flow"><div className="art-flow-line"/><div className="art-step"><span><FileText size={18}/></span><strong>Plan</strong><small>Set the offer</small></div><div className="art-step"><span><RefreshCw size={18}/></span><strong>Subscription</strong><small>Track the term</small></div><div className="art-step"><span><CreditCard size={18}/></span><strong>Invoice</strong><small>Bill with rules</small></div><div className="art-step"><span><Check size={18}/></span><strong>Payment</strong><small>Close the loop</small></div></div></div><div className="art-note"><span><Activity size={15}/></span><div><strong>One connected billing workflow</strong><small>Products, customers, invoices and reports share the same source of truth.</small></div></div></div></main>
+  <div className="login-art" aria-hidden="true"><div className="art-grid"/><div className="art-orb orb-one"/><div className="art-orb orb-two"/><div className="art-content"><div className="art-topline"><span><span className="brand-mark"><RefreshCw size={16}/><i className="brand-spark"/></span> Brightloop workspace</span><span className="art-live"><i/> Subscription operations</span></div><div className="art-story"><span className="art-kicker">A clear path through recurring revenue</span><h2>From first plan<br/>to final payment.</h2><p>Keep every handoff visible, from the quote a customer accepts to the invoice they settle.</p></div><div className="art-flow"><div className="art-flow-line"/><div className="art-step"><span><FileText size={18}/></span><strong>Plan</strong><small>Set the offer</small></div><div className="art-step"><span><RefreshCw size={18}/></span><strong>Subscription</strong><small>Track the term</small></div><div className="art-step"><span><CreditCard size={18}/></span><strong>Invoice</strong><small>Bill with rules</small></div><div className="art-step"><span><Check size={18}/></span><strong>Payment</strong><small>Close the loop</small></div></div></div><div className="art-note"><span><Activity size={15}/></span><div><strong>One connected billing workflow</strong><small>Products, customers, invoices and reports share the same source of truth.</small></div></div></div></main>
 }
 
 function PasswordInput({value,onChange,show,toggle,autoComplete}) { return <span className="password-wrap"><input type={show?'text':'password'} value={value} onChange={onChange} autoComplete={autoComplete} maxLength="200" required/><button type="button" className="password-toggle" aria-label={show?'Hide password':'Show password'} onClick={toggle}>{show?<EyeOff size={15}/>:<Eye size={15}/>}</button></span> }
@@ -359,6 +378,37 @@ function PaymentModal({ invoice, busy, onClose, onSubmit }) {
 
 function PageHeading({ eyebrow, title, desc, action }) { return <div className="page-heading"><div><div className="section-eyebrow">{eyebrow?.toLowerCase()}</div><h1>{title}</h1><p>{desc}</p></div>{action}</div> }
 function Metric({ label, value, detail, icon: Icon, tone, foot }) { return <article className={`metric-card metric-${tone}`}><div className="metric-top"><span>{label}</span><span className={`metric-icon ${tone}`}><Icon size={17}/></span></div><strong>{value}</strong><div className="metric-foot"><span>{detail || 'Current'}</span><span>{foot}</span></div></article> }
+
+function ForecastPanel({ mrrMinor }) {
+  const [horizon, setHorizon] = useState(12)
+  const [growth, setGrowth] = useState(10)
+  const [churn, setChurn] = useState(2)
+  const annualFactor = Math.max(0, 1 + (growth - churn) / 100)
+  const monthlyFactor = Math.pow(annualFactor, 1 / 12)
+  const points = Array.from({ length: horizon }, (_, index) => ({
+    month: index + 1,
+    amount: Math.round((mrrMinor || 0) * Math.pow(monthlyFactor, index + 1)),
+  }))
+  const projectedBillings = points.reduce((sum, point) => sum + point.amount, 0)
+  const maxAmount = Math.max(1, ...points.map(point => point.amount))
+  const plot = points.map((point, index) => ({
+    ...point,
+    x: 42 + (index / Math.max(1, points.length - 1)) * 638,
+    y: 188 - (point.amount / maxAmount) * 150,
+  }))
+  const line = plot.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ')
+  const area = plot.length ? `${line} L 680 198 L 42 198 Z` : ''
+  return <section className="panel forecast-panel">
+    <div className="forecast-header"><div><span className="forecast-kicker"><ChartNoAxesCombined size={16}/> Scenario planning</span><h2>Revenue forecast</h2><p>Projected recurring billings from today’s active subscription base.</p></div><div className="horizon-switch" role="group" aria-label="Forecast length">{[6,12,24].map(months=><button key={months} aria-pressed={horizon===months} className={horizon===months?'selected':''} onClick={()=>setHorizon(months)}>{months} mo</button>)}</div></div>
+    <div className="forecast-summary"><div><span>Projected billings · next {horizon} months</span><strong>{money(projectedBillings)}</strong></div><div><span>Ending monthly run rate</span><strong>{money(points.at(-1)?.amount || 0)}</strong></div></div>
+    <div className="forecast-chart" role="img" aria-label={`Recurring revenue forecast over ${horizon} months. Starting monthly recurring revenue is ${money(mrrMinor)}; projected billings are ${money(projectedBillings)}.`}>
+      <svg viewBox="0 0 720 230" preserveAspectRatio="none" aria-hidden="true"><path className="forecast-gridline" d="M42 38H690 M42 88H690 M42 138H690 M42 198H690"/><path className="forecast-area" d={area}/><path className="forecast-line" d={line}/>{plot.map(point=><circle key={point.month} cx={point.x} cy={point.y} r="4"><title>Month {point.month}: {money(point.amount)}</title></circle>)}</svg>
+      <div className="forecast-axis"><span>Now</span><span>Month {horizon}</span></div>
+    </div>
+    <div className="forecast-controls"><label>Annual expansion <strong>{growth}%</strong><input aria-label="Annual expansion assumption" type="range" min="0" max="30" step="1" value={growth} onChange={event=>setGrowth(Number(event.target.value))}/><small>Expected recurring growth</small></label><label>Annual churn <strong>{churn}%</strong><input aria-label="Annual churn assumption" type="range" min="0" max="30" step="1" value={churn} onChange={event=>setChurn(Number(event.target.value))}/><small>Expected recurring revenue lost</small></label></div>
+    <p className="forecast-note">Scenario estimate, not a prediction. Uses gross MRR before tax and discounts; change the assumptions to explore outcomes.</p>
+  </section>
+}
 
 function Overview({ data, invoices, payments, subs, isStaff, busy, onRun, onView, onPay, onOpenInvoice, onOpenSubscription }) {
   const [activeTab, setActiveTab] = useState('Active subscriptions')
@@ -385,9 +435,11 @@ function Overview({ data, invoices, payments, subs, isStaff, busy, onRun, onView
     'Active subscriptions': <SubscriptionTable rows={data?.active_subscription_rows || []} isStaff onOpen={onOpenSubscription} emptyMessage="There are no active subscriptions."/>,
   }
   return <><PageHeading eyebrow={todayLabel} title="Dashboard" desc="See what’s active, what’s due, and what has been collected." action={isStaff && <button className="primary-button" onClick={onRun} disabled={busy}><RefreshCw size={15} className={busy ? 'spin' : ''}/> Run billing</button>} />
-    <div className="metric-grid"><Metric label="Active subscriptions" value={(data?.active_subscriptions || 0).toLocaleString()} detail="Live" foot="current portfolio" icon={RefreshCw} tone="blue"/><Metric label="Revenue collected" value={money(data?.revenue_minor)} detail="All payments" foot="recorded to date" icon={ArrowDownLeft} tone="violet"/><Metric label="Outstanding amount" value={money(data?.outstanding_minor)} detail="Open invoices" foot="remaining balance" icon={BadgeIndianRupee} tone="amber"/><Metric label="Overdue invoices" value={(data?.overdue_count || 0).toLocaleString()} detail={money(data?.overdue_amount_minor)} foot="past due amount" icon={FileText} tone="red"/></div>
+    <div className="metric-grid"><Metric label="Active subscriptions" value={(data?.active_subscriptions || 0).toLocaleString()} detail="Live" foot="current portfolio" icon={RefreshCw} tone="blue"/><Metric label="Monthly recurring revenue" value={money(data?.mrr_minor)} detail="Active contract value" foot="gross · normalized monthly" icon={ArrowDownLeft} tone="green"/><Metric label="Annual recurring revenue" value={money(data?.arr_minor)} detail="12 × current MRR" foot="annualized run rate" icon={ChartNoAxesCombined} tone="violet"/><Metric label="Outstanding balance" value={money(data?.outstanding_minor)} detail="Open invoices" foot={`${data?.overdue_count || 0} overdue`} icon={BadgeIndianRupee} tone="amber"/></div>
     <div className="overview-grid"><section className="panel revenue-panel"><div className="panel-heading"><div><h2>Revenue collected</h2><p>Payments received over the last 30 days</p></div><span className="range-pill">Last 30 days</span></div><div className="chart-legend"><span><i className="legend-collected"/> Collected</span><strong>{money(data?.revenue_30d_minor)} <small>last 30 days</small></strong></div>{history.length ? <><div className="bar-chart"><div className="chart-y"><span>{money(maxBar)}</span><span>{money(maxBar / 2)}</span><span>₹0</span></div><div className="bars"><div className="bar-grid bg1"/><div className="bar-grid bg2"/><div className="bar-grid bg3"/>{bins.map((bin,i)=><div className="bar-pair" key={i} title={`${bin.label}: ${money(bin.amount)}`}><span style={{height:`${Math.max(3, bin.amount / maxBar * 86)}%`}}/><small>{bin.label}</small></div>)}</div></div><div className="chart-x"><span>30 days ago</span><span>Today</span></div></> : <div className="chart-empty"><span><Activity size={17}/></span><div><strong>No payments recorded in the last 30 days</strong><small>The collection trend will appear here after payments arrive.</small></div></div>}</section>
       <section className="panel renewals-panel"><div className="panel-heading"><div><h2>Subscriptions by status</h2><p>Current portfolio distribution</p></div></div><div className="status-chart">{statusEntries.map(item=><div className="status-chart-row" key={item.status}><span><StatusBadge status={item.status}/></span><div className="status-track"><i className={`status-fill status-fill-${item.status.toLowerCase()}`} style={{width:`${data?.active_subscriptions ? Math.max(3,item.count / Math.max(1,data.active_subscriptions) * 100) : 0}%`}}/></div><strong>{item.count}</strong></div>)}</div></section></div>
+    <ForecastPanel mrrMinor={data?.mrr_minor || 0}/>
+    {data?.overdue_count > 0 && <button className="overdue-callout" onClick={()=>onView('Invoices')}><FileText size={17}/><span><strong>{data.overdue_count} overdue invoice{data.overdue_count===1?'':'s'}</strong><small>{money(data.overdue_amount_minor)} needs follow-up</small></span><ArrowUpRight size={15}/></button>}
     <section className="panel table-panel dashboard-activity"><div className="activity-tabs" role="tablist" aria-label="Dashboard records">{Object.keys(tabContent).map(name=><button key={name} role="tab" aria-selected={activeTab===name} className={activeTab===name?'selected':''} onClick={()=>setActiveTab(name)}>{name}{name==='Overdue invoices'&&data?.overdue_count>0&&<span>{data.overdue_count}</span>}</button>)}</div><div className="panel-heading"><div><h2>{activeTab}</h2><p>{activeTab==='Overdue invoices'?'Invoices requiring follow-up':activeTab==='Recent payments'?'Latest recorded collections':'Upcoming recurring revenue'}</p></div><button className="text-button" onClick={()=>onView(activeTab==='Overdue invoices'?'Invoices':activeTab==='Recent payments'?'Payments':'Subscriptions')}>View all <ArrowUpRight size={14}/></button></div>{tabContent[activeTab]}</section>
   </>
 }
@@ -427,7 +479,7 @@ function InvoiceDetail({id,request,refresh,isStaff,onBack,onPay,onConfirm,onCanc
     {isStaff && data.status !== 'Paid' && data.status !== 'Cancelled' && <button className="secondary-button" onClick={()=>{if(window.confirm('Cancel this invoice? Any recorded payment prevents cancellation.'))onCancel(data.id)}} disabled={busy}><Ban size={15}/> Cancel invoice</button>}
     <button className="secondary-button" onClick={()=>window.print()}><FileText size={15}/> Print</button>
     <button className="secondary-button" onClick={onBack}>Back</button>
-  </div>}/><article className="panel invoice-document"><div className="invoice-doc-top"><div className="invoice-wordmark"><span className="brand-mark"><Activity size={18}/></span><strong>brightloop<span>.</span></strong></div><div className="invoice-doc-number"><span>INVOICE</span><strong>{data.number}</strong></div></div><div className="invoice-parties"><div><span className="detail-label">FROM</span><strong>Brightloop Software</strong><small>billing@brightloop.example</small></div><div><span className="detail-label">BILL TO</span><strong>{data.customer?.name}</strong><small>{data.customer?.email}</small></div><div><span className="detail-label">ISSUED</span><strong>{niceDate(data.period_start)}</strong><span className="detail-label">DUE DATE</span><strong>{niceDate(data.due_date)}</strong><span className="detail-label">DELIVERY</span><small>{data.sent_at ? `Dispatch logged ${niceDate(data.sent_at)}` : 'Not dispatched yet'}</small></div></div><div className="table-wrap invoice-lines"><table><thead><tr><th>DESCRIPTION</th><th>QTY</th><th>UNIT PRICE</th><th>TAX</th><th>AMOUNT</th></tr></thead><tbody>{data.lines.map(line=><tr key={line.id}><td>{line.description}<small className="cell-sub">{[line.product_name,line.variant_name].filter(Boolean).join(' · ')}</small></td><td>{line.quantity}</td><td><MoneyCell value={line.unit_price_minor}/></td><td><MoneyCell value={line.tax_minor}/></td><td><MoneyCell value={line.amount_minor}/></td></tr>)}</tbody></table></div><div className="invoice-totals">
+  </div>}/><article className="panel invoice-document"><div className="invoice-doc-top"><div className="invoice-wordmark"><span className="brand-mark"><RefreshCw size={18}/><i className="brand-spark"/></span><strong>brightloop<span>.</span></strong></div><div className="invoice-doc-number"><span>INVOICE</span><strong>{data.number}</strong></div></div><div className="invoice-parties"><div><span className="detail-label">FROM</span><strong>Brightloop Software</strong><small>billing@brightloop.example</small></div><div><span className="detail-label">BILL TO</span><strong>{data.customer?.name}</strong><small>{data.customer?.email}</small></div><div><span className="detail-label">ISSUED</span><strong>{niceDate(data.period_start)}</strong><span className="detail-label">DUE DATE</span><strong>{niceDate(data.due_date)}</strong><span className="detail-label">DELIVERY</span><small>{data.sent_at ? `Dispatch logged ${niceDate(data.sent_at)}` : 'Not dispatched yet'}</small></div></div><div className="table-wrap invoice-lines"><table><thead><tr><th>DESCRIPTION</th><th>QTY</th><th>UNIT PRICE</th><th>TAX</th><th>AMOUNT</th></tr></thead><tbody>{data.lines.map(line=><tr key={line.id}><td>{line.description}<small className="cell-sub">{[line.product_name,line.variant_name].filter(Boolean).join(' · ')}</small></td><td>{line.quantity}</td><td><MoneyCell value={line.unit_price_minor}/></td><td><MoneyCell value={line.tax_minor}/></td><td><MoneyCell value={line.amount_minor}/></td></tr>)}</tbody></table></div><div className="invoice-totals">
     <div><span>Subtotal</span><MoneyCell value={data.subtotal_minor}/></div>
     {data.discount_amount_minor > 0 && <div className="discount-row"><span>Discount ({data.discount_name || 'Rule applied'})</span><MoneyCell value={-data.discount_amount_minor}/></div>}
     {data.discount_amount_minor > 0 && <div><span>Taxable net</span><MoneyCell value={data.subtotal_minor - data.discount_amount_minor}/></div>}

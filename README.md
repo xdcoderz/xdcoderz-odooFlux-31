@@ -39,6 +39,8 @@ Sign-up, staff creation, and password reset require a password with at least nin
 
 Admins manage staff, customers, products, plans, quotation templates, taxes, and discounts. Staff handle subscriptions, invoices, payments, customer requests, and finance reports. Customers can see their own subscriptions and invoices, update their billing profile, and send a request to the team.
 
+The dashboard normalizes active subscription line values into gross MRR, then annualizes that figure as ARR. Both figures are before tax and discounts. Its forecast is an editable scenario based on current MRR, annual expansion and churn assumptions, and a 6, 12, or 24 month horizon; it is separate from cash collected and is not presented as a prediction.
+
 Billing runs when a staff member starts it. Invoice amounts are saved when an invoice is created, and a subscription can only be billed once for a period. Money is stored in paise. Lists use server-side pagination; the default page size is 25, with a maximum of 100.
 
 ## Database changes
