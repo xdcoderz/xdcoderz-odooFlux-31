@@ -16,17 +16,25 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, inspect, or_, select, text, update
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, inspect, or_, select, text, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+IS_VERCEL = os.getenv("VERCEL") == "1"
+SCHEMA_REVISION = "58c430309754"
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./brightloop.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "local-development-secret-change-me")
+if IS_VERCEL and (DATABASE_URL.startswith("sqlite") or not os.getenv("DATABASE_URL")):
+    raise RuntimeError("Set DATABASE_URL to a hosted PostgreSQL connection string for Vercel deployments")
+if IS_VERCEL and TOKEN_SECRET == "local-development-secret-change-me":
+    raise RuntimeError("Set TOKEN_SECRET to a unique secret in Vercel environment variables")
+if IS_VERCEL and not os.getenv("SMTP_HOST", "").strip():
+    raise RuntimeError("Set SMTP_HOST in Vercel so password reset links can be delivered")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 class Base(DeclarativeBase):
@@ -41,11 +49,35 @@ class Customer(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (Index("ix_users_role_active", "role", "is_active"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(300))
     role: Mapped[str] = mapped_column(String(20), default="customer")
+    full_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class CustomerRequest(Base):
+    __tablename__ = "customer_requests"
+    __table_args__ = (Index("ix_customer_requests_status_created", "status", "created_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    request_type: Mapped[str] = mapped_column(String(40))
+    note: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="Open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class Product(Base):
     __tablename__ = "products"
@@ -108,6 +140,7 @@ class Discount(Base):
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
+    __table_args__ = (Index("ix_subscriptions_status_next_billing_date", "status", "next_billing_date"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(30), unique=True, index=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
@@ -154,7 +187,13 @@ class QuotationTemplateLine(Base):
 
 class Invoice(Base):
     __tablename__ = "invoices"
-    __table_args__ = (UniqueConstraint("subscription_id", "period_start", name="uq_invoice_subscription_period"),)
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "period_start", name="uq_invoice_subscription_period"),
+        Index("ix_invoices_status_due_date", "status", "due_date"),
+        Index("ix_invoices_due_date_status", "due_date", "status"),
+        Index("ix_invoices_created_at_status", "created_at", "status"),
+        Index("ix_invoices_customer_created_at", "customer_id", "created_at"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(30), unique=True, index=True)
     subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id"), index=True)
@@ -185,6 +224,7 @@ class InvoiceLine(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
+    __table_args__ = (Index("ix_payments_paid_at_invoice_id", "paid_at", "invoice_id"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), index=True)
     method: Mapped[str] = mapped_column(String(40))
@@ -319,6 +359,28 @@ class StaffIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=9)
 
+class StaffStatusIn(BaseModel):
+    is_active: bool
+
+class PasswordResetRequestIn(BaseModel):
+    email: EmailStr
+
+class PasswordResetConfirmIn(BaseModel):
+    token: str = Field(min_length=32, max_length=200)
+    password: str = Field(min_length=9, max_length=200)
+
+class CustomerProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    email: EmailStr
+
+class CustomerRequestIn(BaseModel):
+    request_type: str = Field(pattern="^(cancel|pause|change_plan|billing_question|profile_update)$")
+    subscription_id: int | None = None
+    note: str = Field(default="", max_length=2000)
+
+class RequestStatusIn(BaseModel):
+    status: str = Field(pattern="^(Open|Resolved|Declined)$")
+
 app = FastAPI(title="Brightloop Subscription API", version="0.1.0")
 allowed_origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if item.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -376,7 +438,7 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
         if claims["exp"] < int(datetime.now(timezone.utc).timestamp()):
             raise ValueError("expired")
         user = db.get(User, int(claims["sub"]))
-        if user is None:
+        if user is None or not user.is_active:
             raise ValueError("unknown user")
         return user
     except Exception:
@@ -547,6 +609,28 @@ def deliver_invoice_email(recipient: str, subject: str, body: str) -> str:
     return "Delivered"
 
 
+def email_frontend_url() -> str:
+    return os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+
+def customer_request_dict(db: Session, request_row: CustomerRequest) -> dict:
+    customer = db.get(Customer, request_row.customer_id)
+    subscription = db.get(Subscription, request_row.subscription_id) if request_row.subscription_id else None
+    return {
+        "id": request_row.id,
+        "customer_id": request_row.customer_id,
+        "customer_name": customer.name if customer else "",
+        "customer_email": customer.email if customer else "",
+        "subscription_id": request_row.subscription_id,
+        "subscription_number": subscription.number if subscription else None,
+        "request_type": request_row.request_type,
+        "note": request_row.note,
+        "status": request_row.status,
+        "created_at": request_row.created_at.isoformat(),
+        "resolved_at": request_row.resolved_at.isoformat() if request_row.resolved_at else None,
+    }
+
+
 def subscription_dict(db: Session, s: Subscription) -> dict:
     c, p = db.get(Customer, s.customer_id), db.get(Plan, s.plan_id)
     lines = list(db.scalars(select(SubscriptionLine).where(SubscriptionLine.subscription_id == s.id).order_by(SubscriptionLine.id)))
@@ -632,32 +716,52 @@ def invoice_dict(db: Session, i: Invoice) -> dict:
 
 @app.on_event("startup")
 def startup() -> None:
-    Base.metadata.create_all(engine)
-    # Keep existing local/demo databases usable as this MVP schema grows.
-    additive_columns = {
-        "plans": {"available_from": "DATE", "available_until": "DATE", "auto_close": "BOOLEAN NOT NULL DEFAULT FALSE", "closable": "BOOLEAN NOT NULL DEFAULT TRUE", "pausable": "BOOLEAN NOT NULL DEFAULT FALSE", "renewable": "BOOLEAN NOT NULL DEFAULT TRUE"},
-        "subscriptions": {"expiry_date": "DATE", "quotation_expires_on": "DATE", "paused": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "discount_id": "INTEGER"},
-        "invoices": {"discount_id": "INTEGER", "discount_amount_minor": "INTEGER NOT NULL DEFAULT 0", "discount_usage_reserved": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "tax_amount_minor": "INTEGER NOT NULL DEFAULT 0", "sent_at": "DATETIME"},
-        "invoice_lines": {"product_id": "INTEGER", "variant_id": "INTEGER"},
-        "discounts": {"min_amount_minor": "INTEGER NOT NULL DEFAULT 0", "min_qty": "INTEGER NOT NULL DEFAULT 1", "starts_on": "DATE", "ends_on": "DATE", "usage_limit": "INTEGER", "used_count": "INTEGER NOT NULL DEFAULT 0", "scope": "VARCHAR(20) NOT NULL DEFAULT 'subscription'", "product_id": "INTEGER"},
-        "quotation_template_lines": {"variant_id": "INTEGER"},
-    }
-    with engine.begin() as connection:
-        for table, columns in additive_columns.items():
-            present = {column["name"] for column in inspect(connection).get_columns(table)}
-            for name, definition in columns.items():
-                if name not in present:
-                    connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'))
+    if IS_VERCEL:
+        inspector = inspect(engine)
+        if not inspector.has_table("alembic_version"):
+            raise RuntimeError("Database migrations are missing. Run `python -m alembic upgrade head` before deploying the API.")
+        with engine.connect() as connection:
+            applied_revision = connection.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+        if applied_revision != SCHEMA_REVISION:
+            raise RuntimeError(f"Database schema revision is {applied_revision or 'empty'}; expected {SCHEMA_REVISION}. Apply migrations before deploying the API.")
+    else:
+        Base.metadata.create_all(engine)
+        # Local development can upgrade older SQLite databases without a manual migration step.
+        additive_columns = {
+            "users": {"full_name": "VARCHAR(160)", "is_active": "BOOLEAN NOT NULL DEFAULT TRUE"},
+            "plans": {"available_from": "DATE", "available_until": "DATE", "auto_close": "BOOLEAN NOT NULL DEFAULT FALSE", "closable": "BOOLEAN NOT NULL DEFAULT TRUE", "pausable": "BOOLEAN NOT NULL DEFAULT FALSE", "renewable": "BOOLEAN NOT NULL DEFAULT TRUE"},
+            "subscriptions": {"expiry_date": "DATE", "quotation_expires_on": "DATE", "paused": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "discount_id": "INTEGER"},
+            "invoices": {"discount_id": "INTEGER", "discount_amount_minor": "INTEGER NOT NULL DEFAULT 0", "discount_usage_reserved": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "tax_amount_minor": "INTEGER NOT NULL DEFAULT 0", "sent_at": "TIMESTAMP"},
+            "invoice_lines": {"product_id": "INTEGER", "variant_id": "INTEGER"},
+            "discounts": {"min_amount_minor": "INTEGER NOT NULL DEFAULT 0", "min_qty": "INTEGER NOT NULL DEFAULT 1", "starts_on": "DATE", "ends_on": "DATE", "usage_limit": "INTEGER", "used_count": "INTEGER NOT NULL DEFAULT 0", "scope": "VARCHAR(20) NOT NULL DEFAULT 'subscription'", "product_id": "INTEGER"},
+            "quotation_template_lines": {"variant_id": "INTEGER"},
+        }
+        with engine.begin() as connection:
+            for table, columns in additive_columns.items():
+                present = {column["name"] for column in inspect(connection).get_columns(table)}
+                for name, definition in columns.items():
+                    if name not in present:
+                        connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'))
     with SessionLocal() as db:
-        if not db.scalar(select(Tax.id).limit(1)):
+        seed_demo_data = os.getenv("SEED_DEMO_DATA", "false" if IS_VERCEL else "true").lower() in {"1", "true", "yes"}
+        if seed_demo_data and not db.scalar(select(Tax.id).limit(1)):
             gst = Tax(name="GST 18%", rate_percent=18.0, is_default=True, active=True)
             zero = Tax(name="Zero Rated 0%", rate_percent=0.0, is_default=False, active=True)
             db.add_all([gst, zero])
-        if not db.scalar(select(Discount.id).limit(1)):
+        if seed_demo_data and not db.scalar(select(Discount.id).limit(1)):
             launch_disc = Discount(name="Launch Discount 10%", discount_type="percentage", value=10.0, code="LAUNCH10", auto_apply=True, active=True)
             fixed_disc = Discount(name="Early VIP Flat ₹500", discount_type="fixed", value=500.0, code="VIP500", auto_apply=False, active=True)
             db.add_all([launch_disc, fixed_disc])
         db.commit()
+        if not seed_demo_data:
+            admin_email = os.getenv("INITIAL_ADMIN_EMAIL", "").strip().lower()
+            admin_password = os.getenv("INITIAL_ADMIN_PASSWORD", "")
+            if admin_email and admin_password and not db.scalar(select(User.id).where(User.role == "admin").limit(1)):
+                db.add(User(email=admin_email, password_hash=hash_password(admin_password), role="admin"))
+                db.commit()
+            if IS_VERCEL and not db.scalar(select(User.id).where(User.role == "admin").limit(1)):
+                raise RuntimeError("Set INITIAL_ADMIN_EMAIL and INITIAL_ADMIN_PASSWORD to bootstrap the first production admin")
+            return
         if db.scalar(select(User.id).limit(1)):
             return
         customer = Customer(name="Northstar Studio", email="billing@northstar.example")
@@ -689,10 +793,14 @@ def signup(body: SignupIn, db: Session = Depends(db_session)) -> dict:
     email = str(body.email).lower()
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
-    customer = Customer(name=body.name, email=email)
-    db.add(customer)
-    db.flush()
-    user = User(email=email, password_hash=hash_password(password), role="customer", customer_id=customer.id)
+    customer = db.scalar(select(Customer).where(func.lower(Customer.email) == email))
+    if customer is None:
+        customer = Customer(name=body.name.strip(), email=email)
+        db.add(customer)
+        db.flush()
+    else:
+        customer.name = body.name.strip()
+    user = User(email=email, password_hash=hash_password(password), role="customer", full_name=body.name.strip(), customer_id=customer.id)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -702,14 +810,72 @@ def signup(body: SignupIn, db: Session = Depends(db_session)) -> dict:
 @app.post("/api/auth/login")
 def login(body: LoginIn, db: Session = Depends(db_session)) -> dict:
     user = db.scalar(select(User).where(User.email == str(body.email).lower()))
-    if user is None or not verify_password(body.password, user.password_hash):
+    if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Email or password is incorrect")
     return {"access_token": make_token(user), "role": user.role, "email": user.email}
 
 
+@app.post("/api/auth/password-reset/request")
+def request_password_reset(body: PasswordResetRequestIn, db: Session = Depends(db_session)) -> dict:
+    user = db.scalar(select(User).where(func.lower(User.email) == str(body.email).lower(), User.is_active.is_(True)))
+    if user:
+        now = datetime.utcnow()
+        recent = db.scalar(select(PasswordResetToken.id).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.created_at >= now - timedelta(minutes=2),
+            PasswordResetToken.used_at.is_(None),
+        ).limit(1))
+        if not recent:
+            db.execute(update(PasswordResetToken).where(PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None)).values(used_at=now))
+            raw_token = secrets.token_urlsafe(32)
+            reset = PasswordResetToken(
+                user_id=user.id,
+                token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+                expires_at=now + timedelta(minutes=30),
+            )
+            db.add(reset)
+            db.commit()
+            link = f"{email_frontend_url()}/?reset_token={raw_token}"
+            email_body = f"Hello,\n\nUse this one-time link to reset your Brightloop password. It expires in 30 minutes:\n{link}\n\nIf you did not request this, you can ignore this email."
+            if not os.getenv("SMTP_HOST", "").strip() and not IS_VERCEL:
+                print(f"Password reset link for {user.email}: {link}")
+            elif not os.getenv("SMTP_HOST", "").strip():
+                db.delete(reset)
+                db.commit()
+            else:
+                try:
+                    deliver_invoice_email(user.email, "Reset your Brightloop password", email_body)
+                except HTTPException as exc:
+                    db.rollback()
+                    db.delete(reset)
+                    db.commit()
+                    print(f"Password reset email delivery failed: {exc.detail}")
+    return {"message": "If an active account exists for that email, a reset link has been sent."}
+
+
+@app.post("/api/auth/password-reset/confirm")
+def confirm_password_reset(body: PasswordResetConfirmIn, db: Session = Depends(db_session)) -> dict:
+    password = body.password
+    if not (any(c.isupper() for c in password) and any(c.islower() for c in password) and any(not c.isalnum() for c in password)):
+        raise HTTPException(status_code=422, detail="Password needs an uppercase letter, a lowercase letter, and a special character")
+    token_hash = hashlib.sha256(body.token.encode()).hexdigest()
+    reset = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash))
+    now = datetime.utcnow()
+    if reset is None or reset.used_at is not None or reset.expires_at < now:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+    user = db.get(User, reset.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+    user.password_hash = hash_password(password)
+    reset.used_at = now
+    db.execute(update(PasswordResetToken).where(PasswordResetToken.user_id == user.id, PasswordResetToken.id != reset.id, PasswordResetToken.used_at.is_(None)).values(used_at=now))
+    db.commit()
+    return {"message": "Password updated. Sign in with your new password."}
+
+
 @app.get("/api/auth/me")
 def me(user: User = Depends(current_user)) -> dict:
-    return {"id": user.id, "email": user.email, "role": user.role, "customer_id": user.customer_id}
+    return {"id": user.id, "email": user.email, "name": user.full_name, "role": user.role, "customer_id": user.customer_id}
 
 
 @app.get("/api/products")
@@ -814,13 +980,98 @@ def list_customers(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, 
 @app.post("/api/customers", status_code=201)
 def create_customer(body: CustomerIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
     email = str(body.email).lower()
-    if db.scalar(select(Customer.id).where(Customer.email == email)):
+    if db.scalar(select(Customer.id).where(func.lower(Customer.email) == email)):
+        raise HTTPException(status_code=409, detail="A customer with this email already exists")
+    if db.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(status_code=409, detail="A customer with this email already exists")
     customer = Customer(name=body.name, email=email)
     db.add(customer)
+    db.flush()
+    db.add(User(email=email, password_hash=hash_password(secrets.token_urlsafe(32)), role="customer", full_name=body.name, customer_id=customer.id))
     db.commit()
     db.refresh(customer)
     return customer_dict(customer)
+
+
+@app.get("/api/customer/profile")
+def get_customer_profile(user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    if user.role != "customer" or user.customer_id is None:
+        raise HTTPException(status_code=403, detail="Customer account required")
+    customer = db.get(Customer, user.customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer profile not found")
+    return {"id": customer.id, "name": customer.name, "email": customer.email}
+
+
+@app.patch("/api/customer/profile")
+def update_customer_profile(body: CustomerProfileIn, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    if user.role != "customer" or user.customer_id is None:
+        raise HTTPException(status_code=403, detail="Customer account required")
+    customer = db.get(Customer, user.customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer profile not found")
+    email = str(body.email).lower()
+    if db.scalar(select(Customer.id).where(func.lower(Customer.email) == email, Customer.id != customer.id)):
+        raise HTTPException(status_code=409, detail="That email is already used by another customer")
+    if db.scalar(select(User.id).where(func.lower(User.email) == email, User.id != user.id)):
+        raise HTTPException(status_code=409, detail="That email is already used by another account")
+    customer.name = body.name.strip()
+    customer.email = email
+    user.full_name = customer.name
+    user.email = email
+    db.commit()
+    return {"id": customer.id, "name": customer.name, "email": customer.email}
+
+
+@app.get("/api/customer/requests")
+def list_my_requests(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    if user.role != "customer" or user.customer_id is None:
+        raise HTTPException(status_code=403, detail="Customer account required")
+    conditions = [CustomerRequest.customer_id == user.customer_id]
+    return paginated(db, select(CustomerRequest).where(*conditions).order_by(CustomerRequest.created_at.desc()), select(func.count(CustomerRequest.id)).where(*conditions), page, page_size, lambda r: customer_request_dict(db, r))
+
+
+@app.post("/api/customer/requests", status_code=201)
+def create_my_request(body: CustomerRequestIn, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    if user.role != "customer" or user.customer_id is None:
+        raise HTTPException(status_code=403, detail="Customer account required")
+    if body.subscription_id:
+        subscription = db.get(Subscription, body.subscription_id)
+        if subscription is None or subscription.customer_id != user.customer_id:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+    new_request = CustomerRequest(customer_id=user.customer_id, subscription_id=body.subscription_id, request_type=body.request_type, note=body.note.strip())
+    db.add(new_request)
+    db.commit()
+    db.refresh(new_request)
+    return customer_request_dict(db, new_request)
+
+
+@app.get("/api/requests")
+def list_customer_requests(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status_filter: str = "", search: str = "", _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    conditions = []
+    if status_filter.strip():
+        conditions.append(CustomerRequest.status == status_filter.strip())
+    if search.strip():
+        term = f"%{search.strip()}%"
+        customer_ids = select(Customer.id).where(or_(Customer.name.ilike(term), Customer.email.ilike(term)))
+        conditions.append(or_(CustomerRequest.customer_id.in_(customer_ids), CustomerRequest.request_type.ilike(term)))
+    query = select(CustomerRequest)
+    count_query = select(func.count(CustomerRequest.id))
+    if conditions:
+        query, count_query = query.where(*conditions), count_query.where(*conditions)
+    return paginated(db, query.order_by(CustomerRequest.created_at.desc()), count_query, page, page_size, lambda r: customer_request_dict(db, r))
+
+
+@app.patch("/api/requests/{request_id}/status")
+def update_customer_request(request_id: int, body: RequestStatusIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    request_row = db.get(CustomerRequest, request_id)
+    if request_row is None:
+        raise HTTPException(status_code=404, detail="Customer request not found")
+    request_row.status = body.status
+    request_row.resolved_at = datetime.utcnow() if body.status in {"Resolved", "Declined"} else None
+    db.commit()
+    db.refresh(request_row)
+    return customer_request_dict(db, request_row)
 
 
 @app.post("/api/staff", status_code=201)
@@ -831,11 +1082,33 @@ def create_staff(body: StaffIn, _: User = Depends(admin_user), db: Session = Dep
     email = str(body.email).lower()
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
-    user = User(email=email, password_hash=hash_password(password), role="staff")
+    user = User(email=email, password_hash=hash_password(password), role="staff", full_name=body.name.strip())
     db.add(user)
     db.commit()
     db.refresh(user)
-    return {"id": user.id, "email": user.email, "role": user.role}
+    return {"id": user.id, "name": user.full_name, "email": user.email, "role": user.role, "is_active": user.is_active}
+
+
+@app.get("/api/staff")
+def list_staff(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), search: str = "", _: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
+    conditions = [User.role == "staff"]
+    if search.strip():
+        term = f"%{search.strip()}%"
+        conditions.append(or_(User.email.ilike(term), User.full_name.ilike(term)))
+    query = select(User).where(*conditions)
+    count_query = select(func.count(User.id)).where(*conditions)
+    return paginated(db, query.order_by(User.full_name, User.email), count_query, page, page_size, lambda u: {"id": u.id, "name": u.full_name or "", "email": u.email, "role": u.role, "is_active": u.is_active})
+
+
+@app.patch("/api/staff/{staff_id}/status")
+def update_staff_status(staff_id: int, body: StaffStatusIn, actor: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
+    staff = db.get(User, staff_id)
+    if staff is None or staff.role != "staff":
+        raise HTTPException(status_code=404, detail="Staff account not found")
+    staff.is_active = body.is_active
+    db.commit()
+    db.refresh(staff)
+    return {"id": staff.id, "name": staff.full_name or "", "email": staff.email, "role": staff.role, "is_active": staff.is_active}
 
 
 @app.get("/api/subscriptions/{subscription_id}")
@@ -1465,4 +1738,43 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
         "revenue_history": revenue_history,
         "revenue_30d_minor": sum(row["amount_minor"] for row in revenue_history),
         "overdue_invoices": [invoice_dict(db, inv) for inv in overdue_rows],
+    }
+
+
+@app.get("/api/reports/finance")
+def finance_report(
+    date_from: date = Query(default_factory=lambda: date.today() - timedelta(days=30)),
+    date_to: date = Query(default_factory=date.today),
+    _: User = Depends(staff_user),
+    db: Session = Depends(db_session),
+) -> dict:
+    if date_from > date_to:
+        raise HTTPException(status_code=422, detail="Start date must be on or before end date")
+    if (date_to - date_from).days > 366:
+        raise HTTPException(status_code=422, detail="Report ranges are limited to 367 days")
+    start_dt = datetime.combine(date_from, datetime.min.time())
+    end_dt = datetime.combine(date_to + timedelta(days=1), datetime.min.time())
+    invoice_scope = [Invoice.created_at >= start_dt, Invoice.created_at < end_dt]
+    billable_invoice_scope = invoice_scope + [Invoice.status.notin_(["Draft", "Cancelled"])]
+    billed_minor = db.scalar(select(func.coalesce(func.sum(Invoice.total_minor), 0)).where(*billable_invoice_scope)) or 0
+    invoice_count = db.scalar(select(func.count(Invoice.id)).where(*billable_invoice_scope)) or 0
+    status_rows = db.execute(select(Invoice.status, func.count(Invoice.id)).where(*invoice_scope).group_by(Invoice.status)).all()
+    paid_minor = db.scalar(select(func.coalesce(func.sum(Payment.amount_minor), 0)).where(Payment.paid_at >= start_dt, Payment.paid_at < end_dt)) or 0
+    daily_rows = db.execute(
+        select(func.date(Payment.paid_at).label("day"), func.sum(Payment.amount_minor).label("amount_minor"))
+        .where(Payment.paid_at >= start_dt, Payment.paid_at < end_dt)
+        .group_by(func.date(Payment.paid_at)).order_by(func.date(Payment.paid_at))
+    ).all()
+    unpaid = select(Payment.invoice_id.label("invoice_id"), func.sum(Payment.amount_minor).label("paid_minor")).group_by(Payment.invoice_id).subquery()
+    balance = case((Invoice.total_minor > func.coalesce(unpaid.c.paid_minor, 0), Invoice.total_minor - func.coalesce(unpaid.c.paid_minor, 0)), else_=0)
+    outstanding_minor = db.scalar(select(func.coalesce(func.sum(balance), 0)).select_from(Invoice).outerjoin(unpaid, unpaid.c.invoice_id == Invoice.id).where(*billable_invoice_scope, Invoice.status.in_(["Confirmed", "Sent"]))) or 0
+    return {
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
+        "invoice_count": invoice_count,
+        "billed_minor": billed_minor,
+        "collected_minor": paid_minor,
+        "outstanding_minor": outstanding_minor,
+        "invoice_status_counts": {name: count for name, count in status_rows},
+        "collections_by_day": [{"day": str(day), "amount_minor": amount or 0} for day, amount in daily_rows],
     }

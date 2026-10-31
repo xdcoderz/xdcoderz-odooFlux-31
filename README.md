@@ -1,66 +1,75 @@
 # Brightloop Subscription Operations
 
-A five-hour MVP slice for managing recurring plans, subscriptions, invoices, payments, and a finance overview.
+Brightloop is a small subscription and billing app. It has a React frontend and a FastAPI API backed by SQLite for local work or PostgreSQL for a hosted environment.
 
-## Run locally
+## Run it locally
 
-Requirements: Python 3.11+ and Node.js 20+.
-
-### API
+Start the API from the repository root:
 
 ```powershell
-cd D:\code\xdcoderz-flux-31\backend
+cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-The first API startup creates a local SQLite database and demo records. API docs are at `http://localhost:8000/docs`.
-
-### Web app
-
-Open a second PowerShell window:
+In another terminal, start the frontend:
 
 ```powershell
-cd D:\code\xdcoderz-flux-31\frontend
+cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Demo admin sign-in:
+Open `http://localhost:5173`. The API docs are at `http://localhost:8000/docs`. On first start, the API creates `backend/brightloop.db` and adds sample records.
 
-- Email: `admin@brightloop.demo`
-- Password: `Brightloop!2026`
+Sample sign-ins (local database only):
 
-Demo customer sign-in:
+| Role | Email | Password |
+| --- | --- | --- |
+| Admin | `admin@brightloop.demo` | `Brightloop!2026` |
+| Customer | `billing@northstar.example` | `Customer!2026` |
 
-- Email: `billing@northstar.example`
-- Password: `Customer!2026`
+The sample credentials appear on the sign-in screen only in development. If SMTP is not configured, password-reset links are written to the API log.
 
-## Current workflow
+## What’s in the app
 
-1. Sign in as admin and review the seeded customer, product, monthly plan, and due subscription.
-2. Add products and variants, define plans with cadence and lifecycle rules, then create reusable quotation templates.
-3. Create a subscription directly or from a template. Review its lines and use guarded actions for quotation, confirmation, activation, pause, resume, closure, and renewal.
-4. Choose **Run billing**, review the cutoff and due count, then create invoices. Each due active subscription gets at most one invoice for its billing period.
-5. Open an invoice to review its line and payment history, print it, or record a payment. Paid invoices update the dashboard totals.
-6. Create a customer from the customer screen, or sign in as the demo customer to see the customer-scoped portal.
+Admins manage staff, customers, products, plans, quotation templates, taxes, and discounts. Staff handle subscriptions, invoices, payments, customer requests, and finance reports. Customers can see their own subscriptions and invoices, update their billing profile, and send a request to the team.
 
-Money is stored as integer paise. Invoice lines snapshot the plan price at billing time. Access roles are `admin`, `staff`, and `customer`; public signup always creates a customer account.
+Billing runs when a staff member starts it. Invoice amounts are saved when an invoice is created, and a subscription can only be billed once for a period. Money is stored in paise. Lists use server-side pagination; the default page size is 25, with a maximum of 100.
 
-## Railway deployment outline
+## Database changes
 
-Create a Railway project with a Postgres database and two services rooted at `backend` and `frontend`. The backend service uses `backend/railway.toml`; set `TOKEN_SECRET` to a long random value and set `CORS_ORIGINS` to the deployed frontend URL. Railway supplies `DATABASE_URL` from Postgres. The frontend service uses `frontend/railway.toml`; set `VITE_API_URL` to the deployed API URL plus `/api` at build time.
+Alembic migrations live in `backend/migrations`. From the `backend` directory, create a migration after changing the models, review the generated file, and apply it:
 
-## Scope notes
+```powershell
+python -m alembic revision --autogenerate -m "describe the change"
+python -m alembic upgrade head
+```
 
-The UI follows the supplied Stripe-style tokens and adds role-filtered navigation, shared status badges, a due-count billing dialog, dashboard tabs, a payments page, and server-side list pagination (25 rows by default; up to 100 per request). Search is debounced and sent to the API. Dashboard figures and chart data come from aggregate queries; the sign-in art is illustrative.
+Add a new migration for each schema change; don’t edit one that has already been applied. Vercel deployments require the database to be migrated before the API starts.
 
-## Three-phase completion plan
+To check the main list and reporting queries against a temporary database with 10,000 subscriptions, run:
 
-- **Phase 1 — Catalog and subscriptions:** product variants, daily/weekly/monthly/yearly plans, availability and lifecycle rules, quotation templates, multi-line subscriptions, expiry dates, pause/resume/renew actions. Implemented in the MVP.
-- **Phase 2 — Billing rules:** tax and discount configuration, invoice state actions, qualifying product/subscription discounts, usage limits, automatic rule application, and SMTP invoice email. Implemented with local email simulation when SMTP is unset.
-- **Phase 3 — Operations and launch:** password reset delivery, staff management screen, richer customer self-service, report filters, large-data performance checks, and production database migrations/deployment.
+```powershell
+python perf_check.py
+```
 
-Billing currently runs on demand; there is no scheduler or payment gateway. Set the optional `SMTP_*` variables in `backend/.env.example` to deliver invoice emails. Railway configuration is present, but deployment has not been done.
+The script creates its own SQLite database and removes it when it finishes. It does not use `brightloop.db`.
+
+## Vercel (not deployed)
+
+Deployment is still on hold. The repository has Vercel settings for two projects: set the backend project’s root directory to `backend` and the frontend project’s root directory to `frontend`.
+
+The API needs a hosted PostgreSQL database; SQLite files aren’t persistent on Vercel. Before deploying the backend, set `DATABASE_URL` and run `python -m alembic upgrade head` from `backend` against that database. Configure these backend environment variables in Vercel:
+
+- `TOKEN_SECRET`: a unique, randomly generated secret.
+- `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD`: used to create the first admin on startup.
+- `SEED_DEMO_DATA=false`: keep the local demo accounts out of the hosted database.
+- `FRONTEND_URL` and `CORS_ORIGINS`: the deployed frontend URL.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, and `SMTP_SSL`: SMTP is required for password-reset email.
+
+After the backend is deployed, set `VITE_API_URL` on the frontend project to `https://<backend-domain>/api`. Once the frontend has its final URL, add that exact origin to `CORS_ORIGINS` and redeploy the backend.
+
+Vercel deployment files are `backend/vercel.json` and `frontend/vercel.json`. No deployment has been made.

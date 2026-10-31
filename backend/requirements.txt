@@ -1,5 +1,6 @@
 fastapi>=0.120
 uvicorn[standard]>=0.37
 SQLAlchemy>=2.0.40
+alembic>=1.14,<2
 pydantic[email]>=2.12
 psycopg[binary]>=3.2

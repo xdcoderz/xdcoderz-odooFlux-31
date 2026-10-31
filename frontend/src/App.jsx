@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Activity, ArrowDownLeft, ArrowUpRight, BadgeIndianRupee, Bell, Check, ChevronDown, CircleHelp, CreditCard, FileText, LayoutDashboard, LogOut, Plus, RefreshCw, Search, ShieldCheck, Users, X, Eye, EyeOff, CheckCircle2, Circle, Percent, Send, Mail, Tag, Ban } from 'lucide-react'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000/api' : '/api')
 const money = (minor = 0) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format((Number(minor) || 0) / 100)
 const niceDate = (raw) => raw ? new Date(`${raw}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
 
@@ -23,6 +23,9 @@ function App() {
   const [templates, setTemplates] = useState([])
   const [taxes, setTaxes] = useState([])
   const [discounts, setDiscounts] = useState([])
+  const [staffUsers, setStaffUsers] = useState([])
+  const [customerRequests, setCustomerRequests] = useState([])
+  const [customerProfile, setCustomerProfile] = useState(null)
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('All')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -31,10 +34,11 @@ function App() {
   const [selectedSubscriptionId, setSelectedSubscriptionId] = useState(null)
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null)
   const [detailRefresh, setDetailRefresh] = useState(0)
-  const [loginEmail, setLoginEmail] = useState('admin@brightloop.demo')
-  const [loginPassword, setLoginPassword] = useState('Brightloop!2026')
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
   const [signupName, setSignupName] = useState('')
-  const [loginMode, setLoginMode] = useState('login')
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('reset_token') || '')
+  const [loginMode, setLoginMode] = useState(() => new URLSearchParams(window.location.search).has('reset_token') ? 'reset' : 'login')
   const [filter, setFilter] = useState('')
   const isStaff = me?.role === 'admin' || me?.role === 'staff'
   const isAdmin = me?.role === 'admin'
@@ -66,6 +70,15 @@ function App() {
         setTemplates(templatePage.items); setPageInfo(current => ({ ...current, templates: templatePage }))
         const [taxList, discountList] = await Promise.all([request('/taxes'), request('/discounts')])
         setTaxes(taxList); setDiscounts(discountList)
+        const requestsPage = await request('/requests?page=1&page_size=100')
+        setCustomerRequests(requestsPage.items)
+        if (identity.role === 'admin') {
+          const staffPage = await request('/staff?page=1&page_size=100')
+          setStaffUsers(staffPage.items)
+        }
+      } else {
+        const [profile, requestsPage] = await Promise.all([request('/customer/profile'), request('/customer/requests?page=1&page_size=100')])
+        setCustomerProfile(profile); setCustomerRequests(requestsPage.items)
       }
       if (identity.role === 'customer' && view === 'Dashboard') setView('My subscriptions')
     } catch (error) {
@@ -174,6 +187,43 @@ function App() {
       localStorage.setItem('brightloop_token', data.access_token); setSessionLoading(true); setToken(data.access_token); setNotice('Your customer account is ready')
     } catch (error) { setNotice(error.message) } finally { setBusy(false) }
   }
+  async function requestPasswordReset(event) {
+    event.preventDefault(); setBusy(true)
+    try {
+      const result = await request('/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: loginEmail }) })
+      setNotice(result.message); setLoginMode('login')
+    } catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
+  async function confirmPasswordReset(event) {
+    event.preventDefault(); setBusy(true)
+    try {
+      const result = await request('/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token: resetToken, password: loginPassword }) })
+      setNotice(result.message); setResetToken(''); setLoginPassword(''); setLoginMode('login')
+      window.history.replaceState({}, '', window.location.pathname)
+    } catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
+  async function saveCustomerProfile(event) {
+    event.preventDefault(); const form = event.currentTarget
+    const body = Object.fromEntries(new FormData(form).entries())
+    setBusy(true)
+    try { const profile = await request('/customer/profile', { method: 'PATCH', body: JSON.stringify(body) }); setCustomerProfile(profile); setNotice('Profile updated'); await load() }
+    catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
+  async function createCustomerRequest(body) {
+    setBusy(true)
+    try { await request('/customer/requests', { method: 'POST', body: JSON.stringify(body) }); setNotice('Request sent to the billing team'); const result = await request('/customer/requests?page=1&page_size=100'); setCustomerRequests(result.items) }
+    catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
+  async function updateStaffStatus(userId, isActive) {
+    setBusy(true)
+    try { await request(`/staff/${userId}/status`, { method: 'PATCH', body: JSON.stringify({ is_active: isActive }) }); setNotice(isActive ? 'Staff account reactivated' : 'Staff account deactivated'); await load() }
+    catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
+  async function updateCustomerRequest(requestId, status) {
+    setBusy(true)
+    try { await request(`/requests/${requestId}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); setNotice(`Request ${status.toLowerCase()}`); await load() }
+    catch (error) { setNotice(error.message) } finally { setBusy(false) }
+  }
   async function runBilling(asOf) {
     setBusy(true)
     try { const data = await request('/billing/run', { method: 'POST', body: JSON.stringify({ as_of: asOf }) }); setBillingOpen(false); setNotice(`Billing complete · ${data.created} created, ${data.skipped} skipped, ${data.failed} failed`); await load() }
@@ -216,14 +266,14 @@ function App() {
   }
 
   if (token && !me && sessionLoading) return <div className="session-loading" role="status" aria-live="polite"><span className="brand-mark"><Activity size={20}/></span><strong>Opening your workspace…</strong></div>
-  if (!token || !me) return <Login email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} name={signupName} setName={setSignupName} mode={loginMode} setMode={setLoginMode} onSubmit={loginMode === 'signup' ? signup : login} busy={busy} notice={notice} />
+  if (!token || !me) return <Login email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} name={signupName} setName={setSignupName} mode={loginMode} setMode={setLoginMode} onSubmit={loginMode === 'signup' ? signup : loginMode === 'forgot' ? requestPasswordReset : loginMode === 'reset' ? confirmPasswordReset : login} busy={busy} notice={notice} />
 
   const nav = isAdmin ? [
-    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users }, { name: 'Products', icon: CreditCard }, { name: 'Plans', icon: CreditCard }, { name: 'Templates', icon: FileText },
+    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users }, { name: 'Requests', icon: CircleHelp }, { name: 'Reports', icon: BadgeIndianRupee }, { name: 'Staff', icon: ShieldCheck }, { name: 'Products', icon: CreditCard }, { name: 'Plans', icon: CreditCard }, { name: 'Templates', icon: FileText },
   ] : isStaff ? [
-    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users },
+    { name: 'Dashboard', icon: LayoutDashboard }, { name: 'Subscriptions', icon: RefreshCw }, { name: 'Invoices', icon: FileText }, { name: 'Billing rules', icon: Percent }, { name: 'Payments', icon: BadgeIndianRupee }, { name: 'Customers', icon: Users }, { name: 'Requests', icon: CircleHelp }, { name: 'Reports', icon: BadgeIndianRupee },
   ] : [
-    { name: 'My subscriptions', icon: RefreshCw }, { name: 'My invoices', icon: FileText },
+    { name: 'My subscriptions', icon: RefreshCw }, { name: 'My invoices', icon: FileText }, { name: 'My account', icon: Users },
   ]
 
   const filteredSubs = subscriptions
@@ -252,6 +302,10 @@ function App() {
         {(view === 'Invoices' || view === 'My invoices') && <Invoices rows={filteredInvoices} rawInvoices={invoices} isStaff={isStaff} busy={busy} filter={filter} setFilter={setFilter} statusFilter={invoiceStatusFilter} setStatusFilter={setInvoiceStatusFilter} onPay={recordPayment} onRun={() => setBillingOpen(true)} onConfirm={confirmInvoice} onSend={sendInvoiceEmail} onOpen={openInvoice} page={pageInfo.invoices} onPage={page => goToPage('invoices', page)} />}
         {view === 'Billing rules' && isStaff && <BillingRules taxes={taxes} discounts={discounts} products={products} busy={busy} onToggleTax={toggleTax} onToggleDiscount={toggleDiscount} onCreate={submitForm} isAdmin={isAdmin} />}
         {view === 'Customers' && <Customers rows={customers} busy={busy} onCreate={submitForm} page={pageInfo.customers} onPage={page => goToPage('customers', page)} />}
+        {view === 'Staff' && isAdmin && <Staff users={staffUsers} busy={busy} onCreate={submitForm} onToggle={updateStaffStatus} />}
+        {view === 'Requests' && isStaff && <CustomerRequests rows={customerRequests} busy={busy} onUpdate={updateCustomerRequest} />}
+        {view === 'Reports' && isStaff && <Reports request={request} />}
+        {view === 'My account' && me.role === 'customer' && <CustomerPortal profile={customerProfile} subscriptions={subscriptions} requests={customerRequests} busy={busy} onProfileSave={saveCustomerProfile} onRequest={createCustomerRequest} />}
         {(view === 'Products' || view === 'Plans') && <Catalog products={products} plans={plans} isAdmin={isAdmin} busy={busy} onCreate={submitForm} pageInfo={pageInfo} onPage={goToPage} view={view} />}{view === 'Payments' && <Payments rows={payments} page={pageInfo.payments} onPage={page => goToPage('payments', page)} />}{view === 'Templates' && isAdmin && <Templates templates={templates} products={products} plans={plans} busy={busy} onCreate={submitTemplate} />}
       </div>
     </main>
@@ -270,19 +324,21 @@ function Login({ email, setEmail, password, setPassword, name, setName, mode, se
     ['One lowercase letter', /[a-z]/.test(password)],
     ['One special character', /[^A-Za-z0-9]/.test(password)],
   ]
-  const signupReady = rules.every(([,valid])=>valid) && password === confirmPassword && Boolean(name.trim()) && Boolean(email.trim())
+  const passwordReady = rules.every(([,valid])=>valid) && password === confirmPassword
+  const signupReady = passwordReady && Boolean(name.trim()) && Boolean(email.trim())
+  const noticeIsSuccess = notice.startsWith('If an active account exists') || notice.startsWith('Password updated')
   return <main className="login-shell"><section className="login-panel"><div className="brand login-brand"><span className="brand-mark"><Activity size={20} strokeWidth={2.6} /></span><span>brightloop<span className="brand-dot">.</span><small>SUBSCRIPTION OPS</small></span></div>
-    <div className="login-copy"><div className="eyebrow"><span className="eyebrow-dot" /> BILLING, IN ONE PLACE</div><h1>{mode === 'signup' ? <>A clearer way<br/>to <em>subscribe.</em></> : <>Good billing<br/>builds <em>trust.</em></>}</h1><p>Manage your plans, customers, and recurring revenue with a little more clarity.</p></div>
+    <div className="login-copy"><div className="eyebrow"><span className="eyebrow-dot" /> BILLING, IN ONE PLACE</div><h1>{mode === 'signup' ? <>A clearer way<br/>to <em>subscribe.</em></> : mode === 'forgot' || mode === 'reset' ? <>Account<br/><em>recovery.</em></> : <>Good billing<br/>builds <em>trust.</em></>}</h1><p>{mode === 'forgot' ? 'We’ll send a one-time password reset link if the account exists.' : mode === 'reset' ? 'Choose a new password to get back into your account.' : 'Manage your plans, customers, and recurring revenue with a little more clarity.'}</p></div>
     <form className="login-form" onSubmit={onSubmit}>
       {mode === 'signup' && <label>Your name<input value={name} onChange={e=>setName(e.target.value)} autoComplete="name" required/></label>}
-      <label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email" required aria-invalid={Boolean(notice && notice.toLowerCase().includes('email'))}/>{notice && notice.toLowerCase().includes('email') && <small className="field-error">{notice}</small>}</label>
-      <label>Password<PasswordInput value={password} onChange={e=>setPassword(e.target.value)} show={showPassword} toggle={()=>setShowPassword(v=>!v)} autoComplete={mode==='signup'?'new-password':'current-password'}/></label>
-      {mode === 'signup' && <><div className="password-rules" aria-live="polite">{rules.map(([label,valid])=><span key={label} className={valid?'valid':''}>{valid?<CheckCircle2 size={13}/>:<Circle size={13}/>} {label}</span>)}</div><label>Confirm password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} autoComplete="new-password" required aria-describedby="password-match"/></label><small id="password-match" className={confirmPassword && password!==confirmPassword?'field-error':'helper-text'}>{confirmPassword && password!==confirmPassword?'Passwords do not match':'Re-enter your password to confirm.'}</small></>}
-      <button className="primary-button full-button" disabled={busy || (mode==='signup' && !signupReady)}>{busy ? 'Please wait…' : mode==='signup' ? 'Create customer account' : 'Sign in'} <ArrowUpRight size={16} /></button>
-      {notice && !notice.toLowerCase().includes('email') && <div className="login-error" role="alert">{notice}</div>}
-      <div className="demo-login"><span className="demo-dot"/> Demo admin: admin@brightloop.demo <span>Brightloop!2026</span></div>
-      <div className="demo-login"><span className="demo-dot"/> Demo client: billing@northstar.example <span>Customer!2026</span></div>
-      <div className="demo-login"><button type="button" className="text-button" onClick={()=>setMode(mode==='signup'?'login':'signup')}>{mode==='signup'?'Existing customer? Sign in instead':'Create new customer account'}</button></div>
+      {mode !== 'reset' && <label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email" required aria-invalid={Boolean(notice && notice.toLowerCase().includes('email'))}/>{notice && notice.toLowerCase().includes('email') && <small className="field-error">{notice}</small>}</label>}
+      {mode !== 'forgot' && <label>Password<PasswordInput value={password} onChange={e=>setPassword(e.target.value)} show={showPassword} toggle={()=>setShowPassword(v=>!v)} autoComplete={mode==='login'?'current-password':'new-password'}/></label>}
+      {(mode === 'signup' || mode === 'reset') && <><div className="password-rules" aria-live="polite">{rules.map(([label,valid])=><span key={label} className={valid?'valid':''}>{valid?<CheckCircle2 size={13}/>:<Circle size={13}/>} {label}</span>)}</div><label>Confirm password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} autoComplete="new-password" required aria-describedby="password-match"/></label><small id="password-match" className={confirmPassword && password!==confirmPassword?'field-error':'helper-text'}>{confirmPassword && password!==confirmPassword?'Passwords do not match':'Re-enter your password to confirm.'}</small></>}
+      <button className="primary-button full-button" disabled={busy || ((mode==='signup'||mode==='reset') && !passwordReady)}>{busy ? 'Please wait…' : mode==='signup' ? 'Create customer account' : mode==='forgot' ? 'Send reset link' : mode==='reset' ? 'Update password' : 'Sign in'} <ArrowUpRight size={16} /></button>
+      {notice && <div className={noticeIsSuccess?'login-success':'login-error'} role={noticeIsSuccess?'status':'alert'}>{notice}</div>}
+      {mode === 'login' && <button type="button" className="text-button" onClick={()=>setMode('forgot')}>Forgot your password?</button>}
+      {import.meta.env.DEV && mode === 'login' && <><div className="demo-login"><span className="demo-dot"/> Demo admin: admin@brightloop.demo <span>Brightloop!2026</span></div><div className="demo-login"><span className="demo-dot"/> Demo client: billing@northstar.example <span>Customer!2026</span></div></>}
+      <div className="demo-login"><button type="button" className="text-button" onClick={()=>setMode(mode==='login'?'signup':'login')}>{mode==='signup'?'Existing customer? Sign in instead':mode==='login'?'Create new customer account':'Back to sign in'}</button></div>
     </form><footer className="login-footer"><span><ShieldCheck size={14}/> SOC2 Type II Certified</span><span>256-bit TLS encrypted</span></footer></section>
   <div className="login-art" aria-hidden="true"><div className="art-grid"/><div className="art-orb orb-one"/><div className="art-orb orb-two"/><div className="art-content"><div className="art-topline"><span><span className="brand-mark"><Activity size={16}/></span> Brightloop Platform</span><span className="art-live"><i/> Live Billing</span></div><div className="art-amount">₹4,28,450 <span>+18.4%</span></div><div className="art-caption">Recurring billings processed this period</div><div className="chart-wrap"><div className="chart-gridline g1"/><div className="chart-gridline g2"/><div className="chart-gridline g3"/><svg viewBox="0 0 400 120" preserveAspectRatio="none"><path d="M0,90 Q80,75 140,50 T280,35 T400,10" fill="none" stroke="#4cd299" strokeWidth="3"/></svg><div className="chart-months"><span>May</span><span>Jun</span><span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span></div></div><div className="art-stats"><div><small>ACTIVE PLANS</small><strong>12</strong><span><i></i> Enterprise</span></div><div><small>COLLECTION RATE</small><strong>99.2%</strong><span><i></i> High confidence</span></div><div><small>NEXT RUN</small><strong>Today</strong><span><i></i> Auto cutoff</span></div></div></div><div className="art-note"><span><CreditCard size={15}/></span><div><strong>Smart Tax & Discount Automation</strong><small>Rules automatically applied during recurring billing</small></div></div></div></main>
 }
@@ -486,8 +542,34 @@ function BillingRules({ taxes, discounts, products, busy, onToggleTax, onToggleD
   </>
 }
 
+function Staff({users,busy,onCreate,onToggle}) {
+  return <><PageHeading eyebrow="ACCESS CONTROL" title="Staff" desc="Invite billing teammates and control their workspace access."/><div className="content-split"><section className="panel form-panel compact-form"><div className="form-title"><div><span className="form-icon blue"><ShieldCheck size={16}/></span><div><h2>Invite a teammate</h2><p>Staff can manage billing operations but cannot manage staff access.</p></div></div></div><form className="stack-form" onSubmit={e=>onCreate(e,'/staff')}><label>Name<input name="name" required maxLength="160" placeholder="Alex Morgan"/></label><label>Work email<input name="email" type="email" required placeholder="alex@company.com"/></label><label>Temporary password<input name="password" type="password" required minLength="9" autoComplete="new-password"/><small className="helper-text">At least 9 characters, including uppercase, lowercase, and a symbol.</small></label><button className="primary-button" disabled={busy}>Create staff account <Plus size={15}/></button></form></section><section className="panel table-panel"><div className="panel-heading"><div><h2>Team members</h2><p>{users.length} staff account(s)</p></div></div><div className="customer-list">{users.map(u=><div className="customer-full-row" key={u.id}><div className="customer-initial initial-1">{(u.name||u.email)[0].toUpperCase()}</div><div><strong>{u.name||'Team member'}</strong><small>{u.email}</small></div><span className={`status-badge ${u.is_active?'status-active':'status-closed'}`}>{u.is_active?'Active':'Inactive'}</span><button className="secondary-button compact-action" disabled={busy} onClick={()=>onToggle(u.id,!u.is_active)}>{u.is_active?'Deactivate':'Reactivate'}</button></div>)}{!users.length&&<Empty message="No teammates yet"/>}</div></section></div></>
+}
+
+function CustomerRequests({rows,busy,onUpdate}) {
+  const label = value => ({cancel:'Cancel subscription',pause:'Pause subscription',change_plan:'Change plan',billing_question:'Billing question',profile_update:'Update profile'}[value]||value)
+  return <><PageHeading eyebrow="CUSTOMER CARE" title="Requests" desc="Review account and subscription requests from customers."/><section className="panel table-panel"><div className="panel-heading"><div><h2>Customer requests</h2><p>{rows.filter(r=>r.status==='Open').length} open · {rows.length} recent</p></div></div><div className="customer-list">{rows.map(r=><article className="request-card" key={r.id}><div className="request-card-head"><div><strong>{label(r.request_type)}</strong><small>{r.customer_name} · {r.customer_email}{r.subscription_number?` · ${r.subscription_number}`:''}</small></div><span className={`status-badge ${r.status==='Open'?'status-pending':r.status==='Resolved'?'status-paid':'status-closed'}`}>{r.status}</span></div>{r.note&&<p>{r.note}</p>}<small>Received {new Date(r.created_at).toLocaleString('en-IN')}</small>{r.status==='Open'&&<div className="inline-actions"><button className="primary-button" disabled={busy} onClick={()=>onUpdate(r.id,'Resolved')}>Resolve <Check size={14}/></button><button className="secondary-button" disabled={busy} onClick={()=>onUpdate(r.id,'Declined')}>Decline</button></div>}</article>)}{!rows.length&&<Empty message="No customer requests yet"/>}</div></section></>
+}
+
+function Reports({request}) {
+  const today = new Date().toISOString().slice(0,10)
+  const monthAgo = new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const [from,setFrom] = useState(monthAgo)
+  const [to,setTo] = useState(today)
+  const [data,setData] = useState(null)
+  const [loading,setLoading] = useState(false)
+  const [error,setError] = useState('')
+  useEffect(()=>{let current=true;setLoading(true);setError('');request(`/reports/finance?date_from=${from}&date_to=${to}`).then(result=>{if(current)setData(result)}).catch(err=>{if(current)setError(err.message)}).finally(()=>{if(current)setLoading(false)});return()=>{current=false}},[from,to,request])
+  return <><PageHeading eyebrow="FINANCE ANALYTICS" title="Reports" desc="Review invoices and collections over a selected date range."/><section className="panel report-filter"><label>From<input type="date" value={from} onChange={e=>setFrom(e.target.value)} max={to}/></label><label>To<input type="date" value={to} onChange={e=>setTo(e.target.value)} min={from} max={today}/></label><button className="secondary-button" onClick={()=>window.print()}><FileText size={15}/> Print report</button></section>{error&&<div className="inline-error" role="alert">{error}</div>}{loading&&!data?<div className="session-loading">Loading report…</div>:data&&<><div className="metric-grid"><Metric label="Invoices issued" value={data.invoice_count} detail="Selected range" icon={FileText} tone="blue" foot=""/><Metric label="Billed" value={money(data.billed_minor)} detail="Invoiced" icon={CreditCard} tone="violet" foot=""/><Metric label="Collected" value={money(data.collected_minor)} detail="Recorded payments" icon={BadgeIndianRupee} tone="green" foot=""/><Metric label="Outstanding" value={money(data.outstanding_minor)} detail="Open balances" icon={Activity} tone="orange" foot=""/></div><div className="content-split"><section className="panel table-panel"><div className="panel-heading"><div><h2>Invoice status</h2><p>{data.date_from} to {data.date_to}</p></div></div><div className="report-status-list">{Object.entries(data.invoice_status_counts).map(([name,count])=><div key={name}><span>{name}</span><strong>{count}</strong></div>)}{!Object.keys(data.invoice_status_counts).length&&<Empty message="No invoices in this period"/>}</div></section><section className="panel table-panel"><div className="panel-heading"><div><h2>Collections by day</h2><p>Payments recorded in the selected period</p></div></div><div className="report-status-list">{data.collections_by_day.map(row=><div key={row.day}><span>{niceDate(row.day)}</span><strong>{money(row.amount_minor)}</strong></div>)}{!data.collections_by_day.length&&<Empty message="No collections in this period"/>}</div></section></div></>}</>
+}
+
+function CustomerPortal({profile,subscriptions,requests,busy,onProfileSave,onRequest}) {
+  function submitRequest(event) { event.preventDefault(); const form=event.currentTarget; const body=Object.fromEntries(new FormData(form).entries()); body.subscription_id=body.subscription_id?Number(body.subscription_id):null; onRequest(body); form.reset() }
+  return <><PageHeading eyebrow="CUSTOMER PORTAL" title="My account" desc="Keep your billing contact current and send service requests to the Brightloop team."/><div className="content-split"><section className="panel form-panel compact-form"><div className="form-title"><div><span className="form-icon blue"><Users size={16}/></span><div><h2>Billing profile</h2><p>Updates apply to your account and future invoices.</p></div></div></div><form className="stack-form" onSubmit={onProfileSave} key={profile?.id}><label>Name<input name="name" required maxLength="160" defaultValue={profile?.name||''}/></label><label>Email<input name="email" type="email" required defaultValue={profile?.email||''}/></label><button className="primary-button" disabled={busy}>Save profile <Check size={15}/></button></form></section><section className="panel form-panel compact-form"><div className="form-title"><div><span className="form-icon violet"><CircleHelp size={16}/></span><div><h2>Contact billing support</h2><p>Request a subscription change or ask a question.</p></div></div></div><form className="stack-form" onSubmit={submitRequest}><label>Request type<select name="request_type"><option value="billing_question">Billing question</option><option value="cancel">Cancel a subscription</option><option value="pause">Pause a subscription</option><option value="change_plan">Change my plan</option><option value="profile_update">Other account update</option></select></label><label>Subscription <span className="optional-label">Optional</span><select name="subscription_id" defaultValue=""><option value="">General account request</option>{subscriptions.map(s=><option key={s.id} value={s.id}>{s.number} · {s.plan_name}</option>)}</select></label><label>Details<textarea name="note" rows="3" maxLength="2000" placeholder="Tell us what you need help with"/></label><button className="primary-button" disabled={busy}>Send request <ArrowUpRight size={15}/></button></form></section></div><section className="panel table-panel portal-history"><div className="panel-heading"><div><h2>Request history</h2><p>{requests.length} request(s)</p></div></div><div className="customer-list">{requests.map(r=><article className="request-card" key={r.id}><div className="request-card-head"><div><strong>{r.request_type.replaceAll('_',' ')}</strong><small>{r.subscription_number||'Account-wide'} · {new Date(r.created_at).toLocaleString('en-IN')}</small></div><span className={`status-badge ${r.status==='Open'?'status-pending':r.status==='Resolved'?'status-paid':'status-closed'}`}>{r.status}</span></div>{r.note&&<p>{r.note}</p>}</article>)}{!requests.length&&<Empty message="Your requests will appear here"/>}</div></section></>
+}
+
 function Customers({rows,busy,onCreate,page,onPage}) {
-  return <><PageHeading eyebrow="CUSTOMER DIRECTORY" title="Customers" desc="The people and teams behind your recurring revenue."/><div className="content-split"><section className="panel table-panel"><div className="panel-heading"><div><h2>All customers</h2><p>{page?.total || rows.length} customer accounts</p></div></div><div className="customer-list">{rows.map((c,i)=><div className="customer-full-row" key={c.id}><div className={`customer-initial initial-${i%4}`}>{c.name[0]}</div><div><strong>{c.name}</strong><small>{c.email}</small></div><span className="customer-tag">Customer</span></div>)}{!rows.length&&<Empty message="No customer accounts yet"/>}</div><Pagination page={page} onPage={onPage}/></section><section className="panel form-panel compact-form"><div className="form-title"><div><span className="form-icon violet"><Users size={16}/></span><div><h2>Add a customer</h2><p>Create a billing contact.</p></div></div></div><form className="stack-form" onSubmit={e=>onCreate(e,'/customers')}><label>Company or customer name<input name="name" required placeholder="e.g. Acme Studio"/></label><label>Billing email<input name="email" type="email" required placeholder="billing@company.com"/></label><button className="primary-button" disabled={busy}>Add customer <Plus size={15}/></button></form></section></div></>
+  return <><PageHeading eyebrow="CUSTOMER DIRECTORY" title="Customers" desc="The people and teams behind your recurring revenue."/><div className="content-split"><section className="panel table-panel"><div className="panel-heading"><div><h2>All customers</h2><p>{page?.total || rows.length} customer accounts</p></div></div><div className="customer-list">{rows.map((c,i)=><div className="customer-full-row" key={c.id}><div className={`customer-initial initial-${i%4}`}>{c.name[0]}</div><div><strong>{c.name}</strong><small>{c.email}</small></div><span className="customer-tag">Customer</span></div>)}{!rows.length&&<Empty message="No customer accounts yet"/>}</div><Pagination page={page} onPage={onPage}/></section><section className="panel form-panel compact-form"><div className="form-title"><div><span className="form-icon violet"><Users size={16}/></span><div><h2>Add a customer</h2><p>Create a portal account; the customer can set a password with Forgot password.</p></div></div></div><form className="stack-form" onSubmit={e=>onCreate(e,'/customers')}><label>Company or customer name<input name="name" required placeholder="e.g. Acme Studio"/></label><label>Billing email<input name="email" type="email" required placeholder="billing@company.com"/></label><button className="primary-button" disabled={busy}>Add customer <Plus size={15}/></button></form></section></div></>
 }
 
 function Catalog({products,plans,isAdmin,busy,onCreate,pageInfo,onPage,view}) {
