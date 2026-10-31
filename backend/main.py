@@ -31,8 +31,6 @@ if IS_VERCEL and (DATABASE_URL.startswith("sqlite") or not os.getenv("DATABASE_U
     raise RuntimeError("Set DATABASE_URL to a hosted PostgreSQL connection string for Vercel deployments")
 if IS_VERCEL and TOKEN_SECRET == "local-development-secret-change-me":
     raise RuntimeError("Set TOKEN_SECRET to a unique secret in Vercel environment variables")
-if IS_VERCEL and not os.getenv("SMTP_HOST", "").strip():
-    raise RuntimeError("Set SMTP_HOST in Vercel so password reset links can be delivered")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

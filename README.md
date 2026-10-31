@@ -68,7 +68,7 @@ The API needs a hosted PostgreSQL database; SQLite files aren’t persistent on 
 - `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD`: used to create the first admin on startup.
 - `SEED_DEMO_DATA=false`: keep the local demo accounts out of the hosted database.
 - `FRONTEND_URL` and `CORS_ORIGINS`: the deployed frontend URL.
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, and `SMTP_SSL`: SMTP is required for password-reset email.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, and `SMTP_SSL`: optional until an email provider is configured. Without SMTP, password-reset emails are unavailable and invoice sends are recorded as simulated.
 
 After the backend is deployed, set `VITE_API_URL` on the frontend project to `https://<backend-domain>/api`. Once the frontend has its final URL, add that exact origin to `CORS_ORIGINS` and redeploy the backend.
 
