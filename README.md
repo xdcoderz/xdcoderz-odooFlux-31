@@ -64,6 +64,8 @@ The script creates its own SQLite database and removes it when it finishes. It d
 
 ## Live deployment
 
+Watch the [Brightloop demo on YouTube](https://www.youtube.com/watch?v=EXqLulUUBNM) for a walkthrough of the application.
+
 Brightloop is deployed as two Vercel projects:
 
 | Service | Live URL |
