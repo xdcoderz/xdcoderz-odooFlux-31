@@ -1,0 +1,18 @@
+2026-10-31 11:24:34.926: [INFO] CurrentProfilePath: D:\code\xdcoderz-flux-31\work\edge-mobile\Default
+2026-10-31 11:24:34.926: [INFO] Profiles total count: 1
+2026-10-31 11:24:34.926: [INFO] Profile: name=Profile 1 path=D:\code\xdcoderz-flux-31\work\edge-mobile\Default lastActive=2026-10-31T11:24:34.906Z
+2026-10-31 11:24:34.926: [INFO] LastUsedProfileDir: D:\code\xdcoderz-flux-31\work\edge-mobile\Default
+2026-10-31 11:24:34.926: [INFO] MostRecentlyActiveProfile: name=Profile 1 path=D:\code\xdcoderz-flux-31\work\edge-mobile\Default lastActive=2026-10-31T11:24:34.906Z
+2026-10-31 11:24:34.926: [INFO] OnDoneLoading sync enabled: 0
+2026-10-31 11:24:34.926: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-10-31 11:24:34.926: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-10-31 11:24:34.926: [INFO] BookmarksSnapshot Startup total=4 bar=4 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-10-31 11:24:35.014: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:24:35.191: [INFO] VisibilityChanged: 0
+2026-10-31 11:24:35.648: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:24:35.652: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:24:35.657: [INFO] Primary account changed.
+2026-10-31 11:24:35.657: [INFO] OnPrimaryAccountChanged PrimaryAccountChangeEvent::Type::kSet
+2026-10-31 11:24:35.667: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:24:35.669: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:24:52.291: [INFO] BookmarksSnapshot Shutdown total=4 bar=4 other=0 mobile=0 showBar=0 showBarNTP=1

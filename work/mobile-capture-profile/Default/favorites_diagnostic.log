@@ -1,0 +1,18 @@
+2026-10-31 11:28:46.059: [INFO] CurrentProfilePath: D:\code\xdcoderz-flux-31\work\mobile-capture-profile\Default
+2026-10-31 11:28:46.059: [INFO] Profiles total count: 1
+2026-10-31 11:28:46.059: [INFO] Profile: name=Profile 1 path=D:\code\xdcoderz-flux-31\work\mobile-capture-profile\Default lastActive=2026-10-31T11:28:46.039Z
+2026-10-31 11:28:46.059: [INFO] LastUsedProfileDir: D:\code\xdcoderz-flux-31\work\mobile-capture-profile\Default
+2026-10-31 11:28:46.059: [INFO] MostRecentlyActiveProfile: name=Profile 1 path=D:\code\xdcoderz-flux-31\work\mobile-capture-profile\Default lastActive=2026-10-31T11:28:46.039Z
+2026-10-31 11:28:46.059: [INFO] OnDoneLoading sync enabled: 0
+2026-10-31 11:28:46.059: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-10-31 11:28:46.059: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-10-31 11:28:46.059: [INFO] BookmarksSnapshot Startup total=4 bar=4 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-10-31 11:28:46.148: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:28:46.329: [INFO] VisibilityChanged: 0
+2026-10-31 11:28:46.907: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:28:46.914: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:28:46.922: [INFO] Primary account changed.
+2026-10-31 11:28:46.922: [INFO] OnPrimaryAccountChanged PrimaryAccountChangeEvent::Type::kSet
+2026-10-31 11:28:46.936: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:28:46.941: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-10-31 11:28:56.309: [INFO] BookmarksSnapshot Shutdown total=4 bar=4 other=0 mobile=0 showBar=0 showBarNTP=1

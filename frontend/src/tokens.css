@@ -1,0 +1,49 @@
+:root {
+  color-scheme: light;
+  font-family: 'DM Sans', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
+  font-weight: 400;
+
+  --background: oklch(0.97 0.012 145);
+  --foreground: oklch(0.24 0.035 165);
+  --surface: oklch(1 0 0);
+  --surface-soft: oklch(0.95 0.016 145);
+  --muted: oklch(0.51 0.025 165);
+  --muted-soft: oklch(0.66 0.02 165);
+  --border: oklch(0.89 0.018 150);
+  --primary: oklch(0.43 0.09 164);
+  --primary-hover: oklch(0.36 0.08 164);
+  --primary-soft: oklch(0.92 0.035 154);
+  --accent: oklch(0.9 0.16 116);
+  --destructive: oklch(0.53 0.16 28);
+  --success: oklch(0.48 0.11 151);
+  --warning: oklch(0.62 0.12 72);
+  --focus: oklch(0.65 0.12 152);
+  --ink: var(--foreground);
+  --line: var(--border);
+  --green: var(--primary);
+  --mint: var(--primary-soft);
+  --navy: var(--foreground);
+  --body: var(--muted);
+  --text-muted: var(--muted);
+  --text-muted-dark: var(--muted-soft);
+  --shadow: var(--shadow-sm);
+  --shadow-sm: 0 1px 2px oklch(0.25 0.03 165 / 0.05);
+  --shadow-md: 0 18px 50px oklch(0.2 0.04 165 / 0.12);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --radius-lg: 14px;
+
+  --layer-sticky: 2;
+  --layer-overlay: 8;
+  --layer-toast: 10;
+}

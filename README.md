@@ -33,6 +33,8 @@ Sample sign-ins (local database only):
 
 The sample credentials appear on the sign-in screen only in development. If SMTP is not configured, password-reset links are written to the API log.
 
+Sign-up, staff creation, and password reset require a password with at least nine characters, an uppercase letter, a lowercase letter, and a special character. The API enforces these rules as well as the sign-in form.
+
 ## What’s in the app
 
 Admins manage staff, customers, products, plans, quotation templates, taxes, and discounts. Staff handle subscriptions, invoices, payments, customer requests, and finance reports. Customers can see their own subscriptions and invoices, update their billing profile, and send a request to the team.

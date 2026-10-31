@@ -1,0 +1,7 @@
+{
+  "tokens": {
+    "iconColor": "--foreground",
+    "accent": "--primary",
+    "radius": "--radius"
+  }
+}

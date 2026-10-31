@@ -15,7 +15,7 @@ from typing import Generator
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, inspect, or_, select, text, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -269,14 +269,27 @@ class DiscountIn(BaseModel):
             raise ValueError("Product-scoped discounts require scope='product'")
         return self
 
-class SignupIn(BaseModel):
+class StrongPasswordIn(BaseModel):
+    password: str = Field(min_length=9, max_length=200)
+
+    @field_validator("password")
+    @classmethod
+    def password_meets_requirements(cls, value: str) -> str:
+        if not any(char.isupper() for char in value):
+            raise ValueError("Password must include an uppercase letter")
+        if not any(char.islower() for char in value):
+            raise ValueError("Password must include a lowercase letter")
+        if not any(not char.isalnum() and not char.isspace() for char in value):
+            raise ValueError("Password must include a special character")
+        return value
+
+class SignupIn(StrongPasswordIn):
     name: str = Field(min_length=1, max_length=160)
     email: EmailStr
-    password: str = Field(min_length=9)
 
 class LoginIn(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=200)
 
 class ProductIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
@@ -352,10 +365,9 @@ class PaymentIn(BaseModel):
 class BillingRunIn(BaseModel):
     as_of: date | None = None
 
-class StaffIn(BaseModel):
+class StaffIn(StrongPasswordIn):
     name: str = Field(min_length=1, max_length=160)
     email: EmailStr
-    password: str = Field(min_length=9)
 
 class StaffStatusIn(BaseModel):
     is_active: bool
@@ -363,9 +375,8 @@ class StaffStatusIn(BaseModel):
 class PasswordResetRequestIn(BaseModel):
     email: EmailStr
 
-class PasswordResetConfirmIn(BaseModel):
+class PasswordResetConfirmIn(StrongPasswordIn):
     token: str = Field(min_length=32, max_length=200)
-    password: str = Field(min_length=9, max_length=200)
 
 class CustomerProfileIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
