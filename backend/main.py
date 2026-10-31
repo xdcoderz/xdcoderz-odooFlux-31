@@ -6,14 +6,17 @@ import hmac
 import json
 import os
 import secrets
+import smtplib
+from email.message import EmailMessage
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Generator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, inspect, or_, select, text
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, cast, create_engine, func, inspect, or_, select, text, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./brightloop.db")
@@ -94,6 +97,14 @@ class Discount(Base):
     code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     auto_apply: Mapped[bool] = mapped_column(Boolean, default=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    min_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
+    min_qty: Mapped[int] = mapped_column(Integer, default=1)
+    starts_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    ends_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    usage_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    scope: Mapped[str] = mapped_column(String(20), default="subscription")
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
@@ -136,6 +147,7 @@ class QuotationTemplateLine(Base):
     template_id: Mapped[int] = mapped_column(ForeignKey("quotation_templates.id", ondelete="CASCADE"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"), nullable=True)
+    variant_id: Mapped[int | None] = mapped_column(ForeignKey("product_variants.id"), nullable=True)
     description: Mapped[str] = mapped_column(String(200))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     unit_price_minor: Mapped[int] = mapped_column(Integer)
@@ -153,6 +165,7 @@ class Invoice(Base):
     subtotal_minor: Mapped[int] = mapped_column(Integer)
     discount_id: Mapped[int | None] = mapped_column(ForeignKey("discounts.id"), nullable=True)
     discount_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
+    discount_usage_reserved: Mapped[bool] = mapped_column(Boolean, default=False)
     tax_id: Mapped[int | None] = mapped_column(ForeignKey("taxes.id"), nullable=True)
     tax_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
     total_minor: Mapped[int] = mapped_column(Integer)
@@ -163,6 +176,8 @@ class InvoiceLine(Base):
     __tablename__ = "invoice_lines"
     id: Mapped[int] = mapped_column(primary_key=True)
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    variant_id: Mapped[int | None] = mapped_column(ForeignKey("product_variants.id"), nullable=True)
     description: Mapped[str] = mapped_column(String(200))
     quantity: Mapped[int] = mapped_column(Integer)
     unit_price_minor: Mapped[int] = mapped_column(Integer)
@@ -194,10 +209,27 @@ class TaxIn(BaseModel):
 
 class DiscountIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    discount_type: str = Field(default="percentage")
+    discount_type: str = Field(default="percentage", pattern="^(percentage|fixed)$")
     value: float = Field(ge=0.0)
     code: str | None = None
     auto_apply: bool = False
+    min_amount_minor: int = Field(default=0, ge=0)
+    min_qty: int = Field(default=1, ge=1)
+    starts_on: date | None = None
+    ends_on: date | None = None
+    usage_limit: int | None = Field(default=None, ge=1)
+    scope: str = Field(default="subscription", pattern="^(subscription|product)$")
+    product_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_scope_and_dates(self):
+        if self.starts_on and self.ends_on and self.ends_on < self.starts_on:
+            raise ValueError("Discount end date must be on or after its start date")
+        if self.scope == "product" and not self.product_id:
+            raise ValueError("Select a product for product-scoped discounts")
+        if self.scope == "subscription" and self.product_id:
+            raise ValueError("Product-scoped discounts require scope='product'")
+        return self
 
 class SignupIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
@@ -260,6 +292,7 @@ class SubscriptionLineIn(BaseModel):
 class QuotationTemplateLineIn(BaseModel):
     product_id: int
     plan_id: int | None = None
+    variant_id: int | None = None
     description: str = Field(min_length=1, max_length=200)
     quantity: int = Field(default=1, ge=1)
     unit_price_minor: int = Field(ge=0)
@@ -407,21 +440,51 @@ def calculate_billing_amounts(
     subtotal_minor: int,
     requested_discount_id: int | None = None,
     requested_tax_id: int | None = None,
+    lines: list | None = None,
+    billing_date: date | None = None,
+    exclude_discount_ids: set[int] | None = None,
 ) -> tuple[int, int | None, int, int | None, int]:
-    discount_id = requested_discount_id or (sub.discount_id if sub else None)
-    discount = db.get(Discount, discount_id) if discount_id else None
-    if not discount:
-        discount = db.scalar(select(Discount).where(Discount.active.is_(True), Discount.auto_apply.is_(True)).limit(1))
-
+    effective_date = billing_date or (sub.next_billing_date if sub else date.today())
+    lines = lines or []
+    total_qty = sum(line.quantity for line in lines) if lines else (sub.quantity if sub else 0)
+    discount_id = requested_discount_id if requested_discount_id is not None else (sub.discount_id if sub else None)
+    if discount_id:
+        candidates = [db.get(Discount, discount_id)]
+    else:
+        candidates = list(db.scalars(select(Discount).where(Discount.active.is_(True), Discount.auto_apply.is_(True)).order_by(Discount.id)))
+    excluded = exclude_discount_ids or set()
+    discount = None
+    eligible_subtotal = subtotal_minor
+    for candidate in candidates:
+        if candidate is None or candidate.id in excluded or not candidate.active:
+            continue
+        if candidate.starts_on and effective_date < candidate.starts_on or candidate.ends_on and effective_date > candidate.ends_on:
+            continue
+        if candidate.usage_limit is not None and candidate.used_count >= candidate.usage_limit:
+            continue
+        if candidate.scope == "product":
+            eligible_lines = [line for line in lines if line.product_id == candidate.product_id]
+            eligible_subtotal = sum(line.quantity * line.unit_price_minor for line in eligible_lines)
+            if eligible_subtotal <= 0:
+                continue
+            candidate_qty = sum(line.quantity for line in eligible_lines)
+        else:
+            eligible_subtotal = subtotal_minor
+            candidate_qty = total_qty
+        if candidate_qty < candidate.min_qty or eligible_subtotal < candidate.min_amount_minor:
+            continue
+        discount = candidate
+        break
     discount_amount_minor = 0
     applied_discount_id = None
-    if discount and discount.active:
+    if discount:
         applied_discount_id = discount.id
         if discount.discount_type == "percentage":
-            discount_amount_minor = round(subtotal_minor * (discount.value / 100.0))
+            raw_discount = Decimal(eligible_subtotal) * Decimal(str(discount.value)) / Decimal(100)
+            discount_amount_minor = int(raw_discount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         else:
-            discount_amount_minor = int(discount.value * 100)
-        discount_amount_minor = max(0, min(subtotal_minor, discount_amount_minor))
+            discount_amount_minor = int((Decimal(str(discount.value)) * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        discount_amount_minor = max(0, min(eligible_subtotal, discount_amount_minor))
 
     taxable_subtotal = max(0, subtotal_minor - discount_amount_minor)
 
@@ -434,10 +497,54 @@ def calculate_billing_amounts(
     applied_tax_id = None
     if tax and tax.active:
         applied_tax_id = tax.id
-        tax_amount_minor = round(taxable_subtotal * (tax.rate_percent / 100.0))
+        raw_tax = Decimal(taxable_subtotal) * Decimal(str(tax.rate_percent)) / Decimal(100)
+        tax_amount_minor = int(raw_tax.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     total_minor = taxable_subtotal + tax_amount_minor
     return discount_amount_minor, applied_discount_id, tax_amount_minor, applied_tax_id, total_minor
+
+
+def reserve_discount_usage(db: Session, discount_id: int | None, effective_date: date) -> bool:
+    if discount_id is None:
+        return True
+    discount = db.get(Discount, discount_id)
+    if discount is None:
+        return False
+    conditions = [Discount.id == discount_id, Discount.active.is_(True)]
+    if discount.starts_on:
+        conditions.append(Discount.starts_on <= effective_date)
+    if discount.ends_on:
+        conditions.append(Discount.ends_on >= effective_date)
+    if discount.usage_limit is not None:
+        conditions.append(Discount.used_count < discount.usage_limit)
+    result = db.execute(update(Discount).where(*conditions).values(used_count=Discount.used_count + 1))
+    return result.rowcount == 1
+
+
+def deliver_invoice_email(recipient: str, subject: str, body: str) -> str:
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host:
+        return "Simulated (SMTP not configured)"
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", os.getenv("SMTP_USERNAME", "billing@brightloop.example"))
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "")
+    password = os.getenv("SMTP_PASSWORD", "")
+    use_ssl = os.getenv("SMTP_SSL", "false").lower() in {"1", "true", "yes"}
+    try:
+        client_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with client_class(host, port, timeout=15) as client:
+            if not use_ssl and os.getenv("SMTP_STARTTLS", "true").lower() not in {"0", "false", "no"}:
+                client.starttls()
+            if username:
+                client.login(username, password)
+            client.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise HTTPException(status_code=502, detail=f"Email delivery failed: {exc.__class__.__name__}") from exc
+    return "Delivered"
 
 
 def subscription_dict(db: Session, s: Subscription) -> dict:
@@ -457,7 +564,7 @@ def subscription_dict(db: Session, s: Subscription) -> dict:
 
     tax = db.get(Tax, s.tax_id) if s.tax_id else None
     discount = db.get(Discount, s.discount_id) if s.discount_id else None
-    _, _, _, _, total_recurring = calculate_billing_amounts(db, s, total)
+    _, _, _, _, total_recurring = calculate_billing_amounts(db, s, total, lines=lines)
 
     return {
         "id": s.id,
@@ -530,7 +637,10 @@ def startup() -> None:
     additive_columns = {
         "plans": {"available_from": "DATE", "available_until": "DATE", "auto_close": "BOOLEAN NOT NULL DEFAULT FALSE", "closable": "BOOLEAN NOT NULL DEFAULT TRUE", "pausable": "BOOLEAN NOT NULL DEFAULT FALSE", "renewable": "BOOLEAN NOT NULL DEFAULT TRUE"},
         "subscriptions": {"expiry_date": "DATE", "quotation_expires_on": "DATE", "paused": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "discount_id": "INTEGER"},
-        "invoices": {"discount_id": "INTEGER", "discount_amount_minor": "INTEGER NOT NULL DEFAULT 0", "tax_id": "INTEGER", "tax_amount_minor": "INTEGER NOT NULL DEFAULT 0", "sent_at": "DATETIME"},
+        "invoices": {"discount_id": "INTEGER", "discount_amount_minor": "INTEGER NOT NULL DEFAULT 0", "discount_usage_reserved": "BOOLEAN NOT NULL DEFAULT FALSE", "tax_id": "INTEGER", "tax_amount_minor": "INTEGER NOT NULL DEFAULT 0", "sent_at": "DATETIME"},
+        "invoice_lines": {"product_id": "INTEGER", "variant_id": "INTEGER"},
+        "discounts": {"min_amount_minor": "INTEGER NOT NULL DEFAULT 0", "min_qty": "INTEGER NOT NULL DEFAULT 1", "starts_on": "DATE", "ends_on": "DATE", "usage_limit": "INTEGER", "used_count": "INTEGER NOT NULL DEFAULT 0", "scope": "VARCHAR(20) NOT NULL DEFAULT 'subscription'", "product_id": "INTEGER"},
+        "quotation_template_lines": {"variant_id": "INTEGER"},
     }
     with engine.begin() as connection:
         for table, columns in additive_columns.items():
@@ -652,7 +762,7 @@ def create_plan(body: PlanIn, _: User = Depends(admin_user), db: Session = Depen
 
 def template_dict(db: Session, template: QuotationTemplate) -> dict:
     lines = list(db.scalars(select(QuotationTemplateLine).where(QuotationTemplateLine.template_id == template.id).order_by(QuotationTemplateLine.id)))
-    return {"id": template.id, "name": template.name, "validity_days": template.validity_days, "active": template.active, "lines": [{"id": line.id, "product_id": line.product_id, "product_name": db.get(Product, line.product_id).name if db.get(Product, line.product_id) else "", "plan_id": line.plan_id, "description": line.description, "quantity": line.quantity, "unit_price_minor": line.unit_price_minor} for line in lines]}
+    return {"id": template.id, "name": template.name, "validity_days": template.validity_days, "active": template.active, "lines": [{"id": line.id, "product_id": line.product_id, "product_name": db.get(Product, line.product_id).name if db.get(Product, line.product_id) else "", "plan_id": line.plan_id, "variant_id": line.variant_id, "variant_name": (lambda v: f"{v.attribute}: {v.value}" if v else None)(db.get(ProductVariant, line.variant_id) if line.variant_id else None), "description": line.description, "quantity": line.quantity, "unit_price_minor": line.unit_price_minor} for line in lines]}
 
 
 @app.get("/api/templates")
@@ -673,6 +783,15 @@ def create_template(body: QuotationTemplateIn, _: User = Depends(admin_user), db
                 raise HTTPException(status_code=404, detail=f"Plan {line.plan_id} not found")
             if plan.product_id != line.product_id:
                 raise HTTPException(status_code=422, detail="A template plan must belong to the selected product")
+            if not plan.active or line.quantity < plan.min_qty:
+                raise HTTPException(status_code=422, detail="Template quantities must satisfy the active plan minimum")
+        if line.variant_id:
+            variant = db.get(ProductVariant, line.variant_id)
+            if variant is None or variant.product_id != line.product_id:
+                raise HTTPException(status_code=422, detail="A template variant must belong to the selected product")
+    template_cadences = {db.get(Plan, line.plan_id).billing_period for line in body.lines if line.plan_id}
+    if len(template_cadences) > 1:
+        raise HTTPException(status_code=422, detail="Template recurring plans must use the same billing cadence")
     template = QuotationTemplate(name=body.name, validity_days=body.validity_days)
     db.add(template)
     db.flush()
@@ -791,6 +910,16 @@ def create_subscription(body: SubscriptionIn, _: User = Depends(staff_user), db:
     template = db.get(QuotationTemplate, body.template_id) if body.template_id else None
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    if body.expiry_date and body.expiry_date < body.start_date:
+        raise HTTPException(status_code=422, detail="Subscription expiry must be on or after the start date")
+    if body.tax_id:
+        selected_tax = db.get(Tax, body.tax_id)
+        if selected_tax is None or not selected_tax.active:
+            raise HTTPException(status_code=422, detail="Choose an active tax rule")
+    if body.discount_id:
+        selected_discount = db.get(Discount, body.discount_id)
+        if selected_discount is None or not selected_discount.active:
+            raise HTTPException(status_code=422, detail="Choose an active discount rule")
     if body.template_id and (template is None or not template.active):
         raise HTTPException(status_code=404, detail="Quotation template not found")
     template_lines = list(db.scalars(select(QuotationTemplateLine).where(QuotationTemplateLine.template_id == template.id).order_by(QuotationTemplateLine.id))) if template else []
@@ -804,14 +933,18 @@ def create_subscription(body: SubscriptionIn, _: User = Depends(staff_user), db:
         raise HTTPException(status_code=422, detail="The plan is not available on the subscription start date")
     if body.quantity < plan.min_qty:
         raise HTTPException(status_code=422, detail=f"Plan minimum quantity is {plan.min_qty}")
-    source_lines = body.lines or [SubscriptionLineIn(product_id=line.product_id, plan_id=line.plan_id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor) for line in template_lines]
+    source_lines = body.lines or [SubscriptionLineIn(product_id=line.product_id, plan_id=line.plan_id, variant_id=line.variant_id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor) for line in template_lines]
     if not body.lines and template_lines:
         primary_line = next((line for line in source_lines if line.plan_id == plan.id), None)
         if primary_line:
             primary_line.quantity = body.quantity
     if not source_lines:
         source_lines = [SubscriptionLineIn(product_id=plan.product_id, plan_id=plan.id, quantity=body.quantity, unit_price_minor=plan.price_minor)]
-    subscription = Subscription(number=f"SUB-{secrets.token_hex(3).upper()}", customer_id=customer.id, plan_id=plan.id, start_date=body.start_date, next_billing_date=body.start_date, expiry_date=body.expiry_date, quotation_expires_on=body.start_date + timedelta(days=template.validity_days) if template else None, status="Draft", quantity=body.quantity, payment_terms_days=body.payment_terms_days, tax_id=body.tax_id, discount_id=body.discount_id)
+    if template_lines:
+        template_cadences = {db.get(Plan, line.plan_id).billing_period for line in template_lines if line.plan_id}
+        if len(template_cadences) > 1:
+            raise HTTPException(status_code=422, detail="Template recurring plans must use the same billing cadence")
+    subscription = Subscription(number=f"SUB-{secrets.token_hex(3).upper()}", customer_id=customer.id, plan_id=plan.id, start_date=body.start_date, next_billing_date=body.start_date, expiry_date=body.expiry_date, quotation_expires_on=date.today() + timedelta(days=template.validity_days) if template else None, status="Draft", quantity=body.quantity, payment_terms_days=body.payment_terms_days, tax_id=body.tax_id, discount_id=body.discount_id)
     db.add(subscription)
     db.flush()
     for line in source_lines:
@@ -820,6 +953,10 @@ def create_subscription(body: SubscriptionIn, _: User = Depends(staff_user), db:
         variant = db.get(ProductVariant, line.variant_id) if line.variant_id else None
         if product is None or line_plan and line_plan.product_id != product.id:
             raise HTTPException(status_code=422, detail="Each subscription line must use a valid product and matching plan")
+        if line_plan and (not line_plan.active or line.quantity < line_plan.min_qty):
+            raise HTTPException(status_code=422, detail="Each recurring line must satisfy its active plan minimum quantity")
+        if line_plan and line_plan.billing_period != plan.billing_period:
+            raise HTTPException(status_code=422, detail="All recurring lines on a subscription must use the same billing cadence")
         if line.variant_id and (variant is None or variant.product_id != product.id):
             raise HTTPException(status_code=422, detail="Choose a variant belonging to the selected product")
         price = line.unit_price_minor if line.unit_price_minor is not None else (line_plan.price_minor if line_plan else product.price_minor) + (variant.extra_price_minor if variant else 0)
@@ -864,6 +1001,11 @@ def create_subscription_invoice(subscription_id: int, as_draft: bool = False, _:
     sub = db.get(Subscription, subscription_id)
     if sub is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
+    if sub.status != "Active" or sub.paused:
+        raise HTTPException(status_code=409, detail="Invoices can only be generated for active, unpaused subscriptions")
+    if refresh_subscription_lifecycle(db, sub):
+        db.commit()
+        raise HTTPException(status_code=409, detail="This subscription has expired and was closed automatically")
     plan = db.get(Plan, sub.plan_id)
     period_start = sub.next_billing_date
     existing = db.scalar(select(Invoice.id).where(Invoice.subscription_id == sub.id, Invoice.period_start == period_start))
@@ -874,7 +1016,9 @@ def create_subscription_invoice(subscription_id: int, as_draft: bool = False, _:
         product = db.get(Product, plan.product_id)
         lines = [SubscriptionLine(id=0, subscription_id=sub.id, product_id=plan.product_id, plan_id=plan.id, description=product.name if product else plan.name, quantity=sub.quantity, unit_price_minor=plan.price_minor)]
     subtotal_minor = sum(line.quantity * line.unit_price_minor for line in lines)
-    discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor)
+    discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=period_start)
+    if disc_id and not reserve_discount_usage(db, disc_id, period_start):
+        discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=period_start, exclude_discount_ids={disc_id})
     today = date.today()
     invoice = Invoice(
         number=f"INV-{secrets.token_hex(3).upper()}",
@@ -882,17 +1026,18 @@ def create_subscription_invoice(subscription_id: int, as_draft: bool = False, _:
         customer_id=sub.customer_id,
         period_start=period_start,
         due_date=today + timedelta(days=sub.payment_terms_days),
-        status="Draft" if as_draft else "Confirmed",
+        status="Draft" if as_draft else ("Paid" if total_minor == 0 else "Confirmed"),
         subtotal_minor=subtotal_minor,
         discount_id=disc_id,
         discount_amount_minor=discount_amt,
+        discount_usage_reserved=bool(disc_id),
         tax_id=tx_id,
         tax_amount_minor=tax_amt,
         total_minor=total_minor,
     )
     db.add(invoice)
     db.flush()
-    db.add_all([InvoiceLine(invoice_id=invoice.id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor, amount_minor=line.quantity * line.unit_price_minor) for line in lines])
+    db.add_all([InvoiceLine(invoice_id=invoice.id, product_id=line.product_id, variant_id=line.variant_id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor, amount_minor=line.quantity * line.unit_price_minor) for line in lines])
     if plan:
         sub.next_billing_date = add_period(period_start, plan.billing_period)
     db.commit()
@@ -909,13 +1054,13 @@ def list_invoices(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, l
     if status_filter.strip():
         val = status_filter.strip()
         if val == "Overdue":
-            conditions.extend([Invoice.status.notin_(["Paid", "Cancelled"]), Invoice.due_date < date.today()])
+            conditions.extend([Invoice.status.in_(["Confirmed", "Sent"]), Invoice.due_date < date.today()])
         elif val == "Outstanding":
-            conditions.extend([Invoice.status.notin_(["Paid", "Cancelled"]), Invoice.due_date >= date.today()])
+            conditions.extend([Invoice.status.in_(["Confirmed", "Sent"]), Invoice.due_date >= date.today()])
         else:
             conditions.append(Invoice.status == val)
     if overdue:
-        conditions.extend([Invoice.status.notin_(["Paid", "Cancelled"]), Invoice.due_date < date.today()])
+        conditions.extend([Invoice.status.in_(["Confirmed", "Sent"]), Invoice.due_date < date.today()])
     if search.strip():
         term = f"%{search.strip()}%"
         conditions.append(or_(Invoice.number.ilike(term), Invoice.customer_id.in_(select(Customer.id).where(or_(Customer.name.ilike(term), Customer.email.ilike(term))))))
@@ -948,6 +1093,8 @@ def get_invoice(invoice_id: int, user: User = Depends(current_user), db: Session
         {
             "id": line.id,
             "description": line.description,
+            "product_name": db.get(Product, line.product_id).name if line.product_id and db.get(Product, line.product_id) else None,
+            "variant_name": (lambda v: f"{v.attribute}: {v.value}" if v else None)(db.get(ProductVariant, line.variant_id) if line.variant_id else None),
             "quantity": line.quantity,
             "unit_price_minor": line.unit_price_minor,
             "amount_minor": line.amount_minor,
@@ -977,7 +1124,7 @@ def confirm_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session 
         raise HTTPException(status_code=404, detail="Invoice not found")
     if inv.status != "Draft":
         raise HTTPException(status_code=409, detail=f"Only draft invoices can be confirmed (current status: {inv.status})")
-    inv.status = "Confirmed"
+    inv.status = "Paid" if inv.total_minor == 0 else "Confirmed"
     db.commit()
     db.refresh(inv)
     return invoice_dict(db, inv)
@@ -988,9 +1135,49 @@ def cancel_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session =
     inv = db.get(Invoice, invoice_id)
     if inv is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    if inv.status == "Paid":
-        raise HTTPException(status_code=409, detail="Paid invoices cannot be cancelled")
+    if inv.status in {"Paid", "Cancelled"}:
+        raise HTTPException(status_code=409, detail=f"{inv.status} invoices cannot be cancelled")
+    payments_total = db.scalar(select(func.coalesce(func.sum(Payment.amount_minor), 0)).where(Payment.invoice_id == inv.id)) or 0
+    if payments_total:
+        raise HTTPException(status_code=409, detail="Invoices with recorded payments cannot be cancelled; reverse or reconcile the payment first")
+    if inv.discount_usage_reserved and inv.discount_id:
+        db.execute(update(Discount).where(Discount.id == inv.discount_id, Discount.used_count > 0).values(used_count=Discount.used_count - 1))
+        inv.discount_usage_reserved = False
     inv.status = "Cancelled"
+    db.commit()
+    db.refresh(inv)
+    return invoice_dict(db, inv)
+
+
+@app.post("/api/invoices/{invoice_id}/restore")
+def restore_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+    inv = db.get(Invoice, invoice_id)
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.status != "Cancelled":
+        raise HTTPException(status_code=409, detail="Only cancelled invoices can be restored")
+    if db.scalar(select(func.count(Payment.id)).where(Payment.invoice_id == inv.id)):
+        raise HTTPException(status_code=409, detail="An invoice with payments cannot be restored")
+    sub = db.get(Subscription, inv.subscription_id)
+    lines = list(db.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id).order_by(InvoiceLine.id)))
+    subtotal_minor = sum(line.amount_minor for line in lines)
+    discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=inv.period_start)
+    reserved = False
+    if disc_id:
+        reserved = reserve_discount_usage(db, disc_id, inv.period_start)
+        if not reserved:
+            discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=inv.period_start, exclude_discount_ids={disc_id})
+    inv.number = f"INV-{secrets.token_hex(4).upper()}"
+    inv.status = "Draft"
+    inv.due_date = date.today() + timedelta(days=sub.payment_terms_days if sub else 14)
+    inv.subtotal_minor = subtotal_minor
+    inv.discount_id = disc_id
+    inv.discount_amount_minor = discount_amt
+    inv.discount_usage_reserved = reserved
+    inv.tax_id = tx_id
+    inv.tax_amount_minor = tax_amt
+    inv.total_minor = total_minor
+    inv.sent_at = None
     db.commit()
     db.refresh(inv)
     return invoice_dict(db, inv)
@@ -1001,14 +1188,16 @@ def send_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session = D
     inv = db.get(Invoice, invoice_id)
     if inv is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    if inv.status == "Cancelled":
-        raise HTTPException(status_code=409, detail="Cancelled invoices cannot be sent")
+    if inv.status not in {"Confirmed", "Sent"}:
+        raise HTTPException(status_code=409, detail="Only confirmed invoices can be sent")
     customer = db.get(Customer, inv.customer_id)
     recipient = customer.email if customer else "billing@customer.example"
     tax = db.get(Tax, inv.tax_id) if inv.tax_id else None
     discount = db.get(Discount, inv.discount_id) if inv.discount_id else None
     paid = db.scalar(select(func.coalesce(func.sum(Payment.amount_minor), 0)).where(Payment.invoice_id == inv.id)) or 0
     balance = max(0, inv.total_minor - paid)
+    invoice_lines = list(db.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id == inv.id).order_by(InvoiceLine.id)))
+    line_text = "\n".join(f"• {line.description}: {line.quantity} × ₹{line.unit_price_minor / 100:,.2f} = ₹{line.amount_minor / 100:,.2f}" for line in invoice_lines)
 
     disc_text = f"- ₹{inv.discount_amount_minor / 100:,.2f} ({discount.name})" if inv.discount_amount_minor and discount else (f"- ₹{inv.discount_amount_minor / 100:,.2f}" if inv.discount_amount_minor else "₹0.00")
     tax_text = f"+ ₹{inv.tax_amount_minor / 100:,.2f} ({tax.name})" if inv.tax_amount_minor and tax else (f"+ ₹{inv.tax_amount_minor / 100:,.2f}" if inv.tax_amount_minor else "₹0.00")
@@ -1017,6 +1206,7 @@ def send_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session = D
         f"Hi {customer.name if customer else 'Customer'},\n\n"
         f"Invoice {inv.number} has been issued.\n"
         f"Due date: {inv.due_date.isoformat()}\n"
+        f"\nItems:\n{line_text or 'No line details'}\n"
         f"• Subtotal: ₹{inv.subtotal_minor / 100:,.2f}\n"
         f"• Discount: {disc_text}\n"
         f"• Tax: {tax_text}\n"
@@ -1025,12 +1215,14 @@ def send_invoice(invoice_id: int, _: User = Depends(staff_user), db: Session = D
         f"Please remit payment via bank transfer or card before the due date.\n"
         f"Thank you for choosing Brightloop!"
     )
+    subject = f"Invoice {inv.number} from Brightloop Software"
+    delivery_status = deliver_invoice_email(recipient, subject, preview)
     delivery = InvoiceDelivery(
         invoice_id=inv.id,
         recipient_email=recipient,
-        subject=f"Invoice {inv.number} from Brightloop Software",
+        subject=subject,
         sent_at=datetime.utcnow(),
-        status="Delivered",
+        status=delivery_status,
         content_preview=preview,
     )
     db.add(delivery)
@@ -1049,8 +1241,8 @@ def list_taxes(_: User = Depends(current_user), db: Session = Depends(db_session
 
 
 @app.post("/api/taxes", status_code=201)
-def create_tax(body: TaxIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
-    if db.scalar(select(Tax.id).where(Tax.name == body.name)):
+def create_tax(body: TaxIn, _: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
+    if db.scalar(select(Tax.id).where(func.lower(Tax.name) == body.name.lower())):
         raise HTTPException(status_code=409, detail="A tax with this name already exists")
     if body.is_default:
         for t in db.scalars(select(Tax)):
@@ -1063,7 +1255,7 @@ def create_tax(body: TaxIn, _: User = Depends(staff_user), db: Session = Depends
 
 
 @app.patch("/api/taxes/{tax_id}/toggle")
-def toggle_tax(tax_id: int, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+def toggle_tax(tax_id: int, _: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
     tax = db.get(Tax, tax_id)
     if tax is None:
         raise HTTPException(status_code=404, detail="Tax not found")
@@ -1076,32 +1268,38 @@ def toggle_tax(tax_id: int, _: User = Depends(staff_user), db: Session = Depends
 @app.get("/api/discounts")
 def list_discounts(_: User = Depends(current_user), db: Session = Depends(db_session)) -> list[dict]:
     discounts = list(db.scalars(select(Discount).order_by(Discount.name)))
-    return [{"id": d.id, "name": d.name, "discount_type": d.discount_type, "value": d.value, "code": d.code, "auto_apply": d.auto_apply, "active": d.active} for d in discounts]
+    return [discount_dict(db, d) for d in discounts]
+
+
+def discount_dict(db: Session, d: Discount) -> dict:
+    product = db.get(Product, d.product_id) if d.product_id else None
+    return {"id": d.id, "name": d.name, "discount_type": d.discount_type, "value": d.value, "code": d.code, "auto_apply": d.auto_apply, "active": d.active, "min_amount_minor": d.min_amount_minor, "min_qty": d.min_qty, "starts_on": d.starts_on.isoformat() if d.starts_on else None, "ends_on": d.ends_on.isoformat() if d.ends_on else None, "usage_limit": d.usage_limit, "used_count": d.used_count, "scope": d.scope, "product_id": d.product_id, "product_name": product.name if product else None}
 
 
 @app.post("/api/discounts", status_code=201)
-def create_discount(body: DiscountIn, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
-    if db.scalar(select(Discount.id).where(Discount.name == body.name)):
+def create_discount(body: DiscountIn, _: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
+    if body.discount_type == "percentage" and body.value > 100:
+        raise HTTPException(status_code=422, detail="Percentage discounts must be between 0 and 100")
+    if db.scalar(select(Discount.id).where(func.lower(Discount.name) == body.name.lower())):
         raise HTTPException(status_code=409, detail="A discount with this name already exists")
-    if body.auto_apply:
-        for d in db.scalars(select(Discount)):
-            d.auto_apply = False
-    discount = Discount(name=body.name, discount_type=body.discount_type, value=body.value, code=body.code, auto_apply=body.auto_apply, active=True)
+    if body.scope == "product" and db.get(Product, body.product_id) is None:
+        raise HTTPException(status_code=404, detail="Discount product not found")
+    discount = Discount(**body.model_dump(), active=True)
     db.add(discount)
     db.commit()
     db.refresh(discount)
-    return {"id": discount.id, "name": discount.name, "discount_type": discount.discount_type, "value": discount.value, "code": discount.code, "auto_apply": discount.auto_apply, "active": discount.active}
+    return discount_dict(db, discount)
 
 
 @app.patch("/api/discounts/{discount_id}/toggle")
-def toggle_discount(discount_id: int, _: User = Depends(staff_user), db: Session = Depends(db_session)) -> dict:
+def toggle_discount(discount_id: int, _: User = Depends(admin_user), db: Session = Depends(db_session)) -> dict:
     discount = db.get(Discount, discount_id)
     if discount is None:
         raise HTTPException(status_code=404, detail="Discount not found")
     discount.active = not discount.active
     db.commit()
     db.refresh(discount)
-    return {"id": discount.id, "name": discount.name, "discount_type": discount.discount_type, "value": discount.value, "code": discount.code, "auto_apply": discount.auto_apply, "active": discount.active}
+    return discount_dict(db, discount)
 
 
 @app.get("/api/payments")
@@ -1129,8 +1327,10 @@ def billing_preview(as_of: date | None = None, _: User = Depends(staff_user), db
         plan = db.get(Plan, sub.plan_id)
         if plan:
             lines = list(db.scalars(select(SubscriptionLine).where(SubscriptionLine.subscription_id == sub.id)))
-            subtotal = sum(l.quantity * l.unit_price_minor for l in lines) if lines else plan.price_minor * sub.quantity
-            _, _, _, _, total = calculate_billing_amounts(db, sub, subtotal)
+            if not lines:
+                lines = [SubscriptionLine(id=0, subscription_id=sub.id, product_id=plan.product_id, plan_id=plan.id, description=plan.name, quantity=sub.quantity, unit_price_minor=plan.price_minor)]
+            subtotal = sum(l.quantity * l.unit_price_minor for l in lines)
+            _, _, _, _, total = calculate_billing_amounts(db, sub, subtotal, lines=lines, billing_date=sub.next_billing_date)
             estimated_minor += total
     return {"as_of": cutoff.isoformat(), "due_count": due_count, "skipped": 0, "estimated_total_minor": estimated_minor}
 
@@ -1156,24 +1356,27 @@ def run_billing(body: BillingRunIn, _: User = Depends(staff_user), db: Session =
             product = db.get(Product, plan.product_id)
             lines = [SubscriptionLine(id=0, subscription_id=sub.id, product_id=plan.product_id, plan_id=plan.id, description=f"{product.name if product else plan.name} · {plan.name}", quantity=sub.quantity, unit_price_minor=plan.price_minor)]
         subtotal_minor = sum(line.quantity * line.unit_price_minor for line in lines)
-        discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor)
+        discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=period_start)
+        if disc_id and not reserve_discount_usage(db, disc_id, period_start):
+            discount_amt, disc_id, tax_amt, tx_id, total_minor = calculate_billing_amounts(db, sub, subtotal_minor, lines=lines, billing_date=period_start, exclude_discount_ids={disc_id})
         invoice = Invoice(
             number=f"INV-{secrets.token_hex(3).upper()}",
             subscription_id=sub.id,
             customer_id=sub.customer_id,
             period_start=period_start,
             due_date=today + timedelta(days=sub.payment_terms_days),
-            status="Confirmed",
+            status="Paid" if total_minor == 0 else "Confirmed",
             subtotal_minor=subtotal_minor,
             discount_id=disc_id,
             discount_amount_minor=discount_amt,
+            discount_usage_reserved=bool(disc_id),
             tax_id=tx_id,
             tax_amount_minor=tax_amt,
             total_minor=total_minor,
         )
         db.add(invoice)
         db.flush()
-        db.add_all([InvoiceLine(invoice_id=invoice.id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor, amount_minor=line.quantity * line.unit_price_minor) for line in lines])
+        db.add_all([InvoiceLine(invoice_id=invoice.id, product_id=line.product_id, variant_id=line.variant_id, description=line.description, quantity=line.quantity, unit_price_minor=line.unit_price_minor, amount_minor=line.quantity * line.unit_price_minor) for line in lines])
         sub.next_billing_date = add_period(period_start, plan.billing_period)
         created.append(invoice.number)
     db.commit()
@@ -1185,10 +1388,8 @@ def record_payment(invoice_id: int, body: PaymentIn, _: User = Depends(staff_use
     invoice = db.get(Invoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    if invoice.status == "Paid":
-        raise HTTPException(status_code=409, detail="Invoice is already paid")
-    if invoice.status == "Cancelled":
-        raise HTTPException(status_code=409, detail="Cannot record payment for a cancelled invoice")
+    if invoice.status not in {"Confirmed", "Sent"}:
+        raise HTTPException(status_code=409, detail=f"Payments can only be recorded on confirmed or sent invoices (current status: {invoice.status})")
     already_paid = db.scalar(select(func.coalesce(func.sum(Payment.amount_minor), 0)).where(Payment.invoice_id == invoice.id)) or 0
     if body.amount_minor > invoice.total_minor - already_paid:
         raise HTTPException(status_code=422, detail="Payment cannot exceed the remaining invoice balance")
@@ -1217,19 +1418,27 @@ def overview(user: User = Depends(current_user), db: Session = Depends(db_sessio
     payment_totals = select(Payment.invoice_id.label("invoice_id"), func.sum(Payment.amount_minor).label("paid")).group_by(Payment.invoice_id).subquery()
     paid_amount = func.coalesce(payment_totals.c.paid, 0)
     balance_expr = case((Invoice.total_minor > paid_amount, Invoice.total_minor - paid_amount), else_=0)
-    balance_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status != "Paid", Invoice.status != "Cancelled")
-    overdue_count_query = select(func.count(Invoice.id)).where(Invoice.status != "Paid", Invoice.status != "Cancelled", Invoice.due_date < date.today())
-    overdue_list_query = select(Invoice).where(Invoice.status != "Paid", Invoice.status != "Cancelled", Invoice.due_date < date.today()).order_by(Invoice.due_date).limit(25)
-    overdue_amount_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status != "Paid", Invoice.status != "Cancelled", Invoice.due_date < date.today())
+    payable_statuses = ("Confirmed", "Sent")
+    balance_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status.in_(payable_statuses))
+    overdue_count_query = select(func.count(Invoice.id)).where(Invoice.status.in_(payable_statuses), Invoice.due_date < date.today())
+    overdue_list_query = select(Invoice).where(Invoice.status.in_(payable_statuses), Invoice.due_date < date.today()).order_by(Invoice.due_date).limit(25)
+    overdue_amount_query = select(func.coalesce(func.sum(balance_expr), 0)).select_from(Invoice).outerjoin(payment_totals, payment_totals.c.invoice_id == Invoice.id).where(Invoice.status.in_(payable_statuses), Invoice.due_date < date.today())
     status_query = select(Subscription.status, func.count(Subscription.id)).group_by(Subscription.status)
     active_list_query = select(Subscription).where(Subscription.status == "Active").order_by(Subscription.next_billing_date).limit(10)
     history_day = func.date(Payment.paid_at)
     history_query = select(history_day.label("day"), func.sum(Payment.amount_minor).label("amount_minor")).join(Invoice, Invoice.id == Payment.invoice_id).where(Payment.paid_at >= datetime.utcnow() - timedelta(days=30)).group_by(history_day).order_by(history_day)
+    recurring_lines = select(
+        SubscriptionLine.subscription_id.label("subscription_id"),
+        func.sum(SubscriptionLine.quantity * SubscriptionLine.unit_price_minor).label("subtotal_minor"),
+    ).group_by(SubscriptionLine.subscription_id).subquery()
+    recurring_base = func.coalesce(recurring_lines.c.subtotal_minor, Plan.price_minor * Subscription.quantity)
     mrr_value = case(
-        (Plan.billing_period == "yearly", cast((Plan.price_minor * Subscription.quantity) / 12, Integer)),
-        else_=Plan.price_minor * Subscription.quantity,
+        (Plan.billing_period == "daily", cast(recurring_base / 30, Integer)),
+        (Plan.billing_period == "weekly", cast(recurring_base / 4, Integer)),
+        (Plan.billing_period == "yearly", cast(recurring_base / 12, Integer)),
+        else_=recurring_base,
     )
-    mrr_query = select(func.coalesce(func.sum(mrr_value), 0)).select_from(Subscription).join(Plan, Plan.id == Subscription.plan_id).where(Subscription.status == "Active")
+    mrr_query = select(func.coalesce(func.sum(mrr_value), 0)).select_from(Subscription).join(Plan, Plan.id == Subscription.plan_id).outerjoin(recurring_lines, recurring_lines.c.subscription_id == Subscription.id).where(Subscription.status == "Active")
     if customer_filter is not None:
         balance_query = balance_query.where(Invoice.customer_id == customer_filter)
         overdue_count_query = overdue_count_query.where(Invoice.customer_id == customer_filter)

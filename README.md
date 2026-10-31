@@ -60,7 +60,7 @@ The UI follows the supplied Stripe-style tokens and adds role-filtered navigatio
 ## Three-phase completion plan
 
 - **Phase 1 — Catalog and subscriptions:** product variants, daily/weekly/monthly/yearly plans, availability and lifecycle rules, quotation templates, multi-line subscriptions, expiry dates, pause/resume/renew actions. Implemented in the MVP.
-- **Phase 2 — Billing rules:** tax and discount configuration, invoice state actions (confirm/cancel/send), automatic rule application, and invoice email delivery. Implemented in Phase 2.
+- **Phase 2 — Billing rules:** tax and discount configuration, invoice state actions, qualifying product/subscription discounts, usage limits, automatic rule application, and SMTP invoice email. Implemented with local email simulation when SMTP is unset.
 - **Phase 3 — Operations and launch:** password reset delivery, staff management screen, richer customer self-service, report filters, large-data performance checks, and production database migrations/deployment.
 
-Billing currently runs on demand; there is no scheduler or payment gateway. Railway configuration is present, but deployment has not been done.
+Billing currently runs on demand; there is no scheduler or payment gateway. Set the optional `SMTP_*` variables in `backend/.env.example` to deliver invoice emails. Railway configuration is present, but deployment has not been done.
